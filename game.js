@@ -154,6 +154,12 @@ function buildTrack(trackId) {
   state.trackId = trackId;
   state.totalLaps = track.laps;
 
+  // Remove the title-screen preview car so it doesn't block the view at start
+  if (state.previewCar) {
+    state.scene.remove(state.previewCar.mesh);
+    state.previewCar = null;
+  }
+
   // Clear old track
   if (state.trackGroup) {
     clearGroup(state.trackGroup);
@@ -650,14 +656,13 @@ function updateChaseCamera(dt) {
   state.camera.updateProjectionMatrix();
 
   if (state.cameraMode === 0) {
-    // Chase camera — behind & higher up, looking down at the road ahead
-    const back = new THREE.Vector3(Math.sin(car.heading), 0, Math.cos(car.heading));
-    const camOffset = back.clone().multiplyScalar(-8.5);
-    const target = new THREE.Vector3(car.pos.x + camOffset.x, car.pos.y + 5.8, car.pos.z + camOffset.z);
-    state.camera.position.lerp(target, Math.min(1, dt * 8));
-    // Look at a point slightly ahead of the car (along its forward direction)
-    const ahead = back.clone().multiplyScalar(8);
-    state.camera.lookAt(car.pos.x + ahead.x, car.pos.y + 0.8, car.pos.z + ahead.z);
+    // Chase camera — behind & above, look AT the car so it's always centered
+    const fwd = new THREE.Vector3(Math.sin(car.heading), 0, Math.cos(car.heading));
+    const camOffset = fwd.clone().multiplyScalar(-7.5);
+    const target = new THREE.Vector3(car.pos.x + camOffset.x, car.pos.y + 4.6, car.pos.z + camOffset.z);
+    state.camera.position.lerp(target, Math.min(1, dt * 10));
+    // Look at the car (slightly above so road behind is visible too)
+    state.camera.lookAt(car.pos.x, car.pos.y + 1.0, car.pos.z);
   } else if (state.cameraMode === 1) {
     // Cockpit
     const fwd = new THREE.Vector3(Math.sin(car.heading), 0, Math.cos(car.heading));
