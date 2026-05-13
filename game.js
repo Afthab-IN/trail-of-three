@@ -1351,6 +1351,9 @@ function loop() {
   requestAnimationFrame(loop);
 }
 
+// Expose state for debugging
+if (typeof window !== "undefined") window.__game = state;
+
 // =============================================================
 //  Boot
 // =============================================================
