@@ -28,6 +28,8 @@
           <input id="room-code-input" maxlength="6" placeholder="ABC123" style="text-transform:uppercase;letter-spacing:0.3em;text-align:center;" />
         </div>
         <button id="join-btn" class="ghost">Join a trail</button>
+        <div class="or-divider">— or —</div>
+        <button id="solo-btn" class="ghost">Solo trail (with AI companions)</button>
       </div>
     </div>
   </section>
@@ -36,9 +38,14 @@
   <section id="screen-role" class="centered hidden">
     <div class="shell">
       <h1>Trail of Three</h1>
-      <div class="card">
+      <div class="card" id="room-code-card">
         <label>Room code — share with your two companions</label>
         <div class="room-code" id="room-code-display"></div>
+      </div>
+      <div class="card hidden" id="solo-notice">
+        <p class="muted" style="text-align:center;font-style:italic;">
+          Solo trail — Embra, Korr, and Vael will walk with you. Pick your role.
+        </p>
       </div>
       <div class="card">
         <h2>Choose your role</h2>

@@ -16,14 +16,18 @@ const state = {
   myName: "",
   myRole: null,
   isHost: false,
+  solo: false,
   phase: "home",
-  players: {},     // id -> { name, role, x, y, hp, maxHp, gold, alive }
+  players: {},     // id -> { name, role, x, y, hp, maxHp, gold, alive, isAI? }
   world: null,     // { W, H, tiles, spawns }
   entities: {},    // id -> entity
   lastMoveAt: 0,
   lastAbilityAt: 0,
   pressed: {},
+  aiHealCooldowns: {}, // aiId -> timestamp
 };
+
+const AI_NAMES = { scout: "Embra", brawler: "Korr", mystic: "Vael" };
 
 const $ = (s) => document.querySelector(s);
 
@@ -94,6 +98,11 @@ async function connectChannel() {
 }
 
 function send(payload) {
+  if (state.solo) {
+    // No network — just process locally on next tick
+    setTimeout(() => handle(payload), 0);
+    return;
+  }
   state.channel.send({ type: "broadcast", event: "msg", payload });
 }
 
@@ -120,6 +129,21 @@ async function joinRoom() {
   state.isHost = false;
   await connectChannel();
   enterLobby();
+}
+
+function startSolo() {
+  const name = $("#name").value.trim();
+  if (!name) return banner("Enter your name first.", "error");
+  state.myName = name;
+  state.solo = true;
+  state.isHost = true;
+  state.players[state.myId] = { name, role: null, gold: 0, alive: true };
+  hide("#screen-home");
+  show("#screen-role");
+  // Hide multiplayer-specific bits, show solo notice
+  $("#room-code-card").classList.add("hidden");
+  $("#solo-notice").classList.remove("hidden");
+  renderRolePick();
 }
 
 function enterLobby() {
@@ -322,6 +346,25 @@ function pickRole(role) {
   state.players[state.myId].maxHp = ROLES[role].maxHp;
   state.players[state.myId].hp = ROLES[role].maxHp;
   send({ type: "role-pick", id: state.myId, name: state.myName, role });
+
+  if (state.solo) {
+    // Auto-fill the other two roles with AI companions and start
+    for (const r of ["scout", "brawler", "mystic"]) {
+      if (r === role) continue;
+      const aiId = "ai_" + r;
+      state.players[aiId] = {
+        name: AI_NAMES[r] + " (AI)",
+        role: r,
+        gold: 0,
+        alive: true,
+        isAI: true,
+        hp: ROLES[r].maxHp,
+        maxHp: ROLES[r].maxHp,
+      };
+    }
+    renderRolePick();
+    setTimeout(startGame, 500);
+  }
 }
 
 function startGame() {
@@ -565,18 +608,91 @@ function hostTick() {
       if (victim.hp <= 0) {
         victim.hp = 0;
         victim.alive = false;
-        // Respawn at spawn after 4 seconds
         setTimeout(() => respawn(victimId), 4000);
       }
       send({ type: "player-hp", id: victimId, hp: victim.hp, delta: -e.dmg });
     }
   }
-  // Check if all alive players are dead
-  const aliveCount = Object.values(state.players).filter(p => p.role && p.alive).length;
-  const totalPlayers = Object.values(state.players).filter(p => p.role).length;
-  if (totalPlayers >= 1 && aliveCount === 0) {
-    // already all dead and respawning; treat as defeat if all 3 dead simultaneously
-    // Only trigger lose if no respawn happens — we already schedule respawn, so skip
+  if (state.solo) aiTick();
+}
+
+function aiTick() {
+  const leader = state.players[state.myId];
+  if (!leader || leader.x === undefined) return;
+
+  for (const [aid, ai] of Object.entries(state.players)) {
+    if (!ai.isAI || !ai.alive) continue;
+
+    // 1) If adjacent to a monster/boss, attack it
+    let target = null, targetId = null;
+    for (const [eid, e] of Object.entries(state.entities)) {
+      if (e.type !== "monster" && e.type !== "boss") continue;
+      if (manhattan(ai, e) === 1) { target = e; targetId = eid; break; }
+    }
+    if (target) {
+      const role = ROLES[ai.role];
+      target.hp -= role.dmg;
+      if (target.hp <= 0) {
+        ai.gold = (ai.gold || 0) + (target.gold || 0);
+        send({ type: "player-gold", id: aid, gold: ai.gold, delta: target.gold || 0 });
+        delete state.entities[targetId];
+        send({ type: "entity-remove", id: targetId });
+        if (target.type === "boss") {
+          send({ type: "win" });
+          state.phase = "won";
+        }
+      } else {
+        send({ type: "entity-update", id: targetId, entity: target });
+      }
+      continue;
+    }
+
+    // 2) Mystic AI: heal pulse if anyone nearby is below 50% HP
+    if (ai.role === "mystic") {
+      const cd = state.aiHealCooldowns[aid] || 0;
+      if (Date.now() >= cd) {
+        const needsHeal = Object.values(state.players).some(p =>
+          p.role && p.alive && (p.hp / p.maxHp) < 0.5 && manhattan(p, ai) <= 3
+        );
+        if (needsHeal) {
+          state.aiHealCooldowns[aid] = Date.now() + 8000;
+          hostResolveAbility(aid);
+          continue;
+        }
+      }
+    }
+
+    // 3) Move toward the leader, or toward a nearby enemy if leader is fighting
+    let goalX = leader.x, goalY = leader.y;
+    const nearbyEnemy = Object.values(state.entities).find(e =>
+      (e.type === "monster" || e.type === "boss") && manhattan(ai, e) <= 5);
+    if (nearbyEnemy && manhattan(leader, nearbyEnemy) <= 4) {
+      goalX = nearbyEnemy.x; goalY = nearbyEnemy.y;
+    }
+    const dist = Math.abs(goalX - ai.x) + Math.abs(goalY - ai.y);
+    if (dist <= 1) continue; // already in range
+
+    const dx = Math.sign(goalX - ai.x);
+    const dy = Math.sign(goalY - ai.y);
+    const tries = Math.abs(goalX - ai.x) >= Math.abs(goalY - ai.y)
+      ? [[dx, 0], [0, dy], [0, -dy || 1], [-dx || 1, 0]]
+      : [[0, dy], [dx, 0], [-dx || 1, 0], [0, -dy || 1]];
+
+    for (const [tdx, tdy] of tries) {
+      if (tdx === 0 && tdy === 0) continue;
+      const nx = ai.x + tdx, ny = ai.y + tdy;
+      if (!isWalkable(state.world, nx, ny)) continue;
+      const monsterThere = Object.values(state.entities).find(e =>
+        (e.type === "monster" || e.type === "boss") && e.x === nx && e.y === ny);
+      if (monsterThere) continue;
+      const playerThere = Object.values(state.players).find(p =>
+        p.role && p !== ai && p.x === nx && p.y === ny);
+      if (playerThere) continue;
+      ai.x = nx; ai.y = ny;
+      send({ type: "move", id: aid, x: nx, y: ny });
+      hostCheckPickup(aid);
+      break;
+    }
   }
 }
 
@@ -649,6 +765,7 @@ function setupInput() {
 document.addEventListener("DOMContentLoaded", () => {
   $("#host-btn").addEventListener("click", hostRoom);
   $("#join-btn").addEventListener("click", joinRoom);
+  $("#solo-btn").addEventListener("click", startSolo);
   $("#start-btn").addEventListener("click", startGame);
   $("#play-again").addEventListener("click", () => location.reload());
   $("#btn-attack").addEventListener("click", tryAttack);
