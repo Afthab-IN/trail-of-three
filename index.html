@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Trail of Three</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div class="shell">
+    <h1>Trail of Three</h1>
+    <p class="tagline">A haunted road. Three travelers. One way through.</p>
+
+    <div id="banner" class="banner hidden"></div>
+
+    <!-- Home / lobby -->
+    <section id="screen-home">
+      <div class="card stack">
+        <div>
+          <label for="name">Your name</label>
+          <input id="name" maxlength="20" placeholder="Traveler" />
+        </div>
+
+        <div class="row" style="margin-top:8px;">
+          <button id="host-btn">Host a new trail</button>
+        </div>
+
+        <div style="text-align:center;color:var(--muted);margin:8px 0;">— or —</div>
+
+        <div>
+          <label for="room-code-input">Room code</label>
+          <input id="room-code-input" maxlength="6" placeholder="ABC123" style="text-transform:uppercase;letter-spacing:0.3em;text-align:center;" />
+        </div>
+        <button id="join-btn" class="ghost">Join a trail</button>
+      </div>
+    </section>
+
+    <!-- Role pick -->
+    <section id="screen-role" class="hidden">
+      <div class="card">
+        <label>Room code — share with your two companions</label>
+        <div class="room-code" id="room-code-display"></div>
+      </div>
+
+      <div class="card">
+        <h2>Choose your role</h2>
+        <p class="muted">One of each. The trail demands all three.</p>
+        <div class="role-pick" id="role-pick"></div>
+        <div style="margin-top:16px;">
+          <div id="players" class="players"></div>
+        </div>
+        <div class="muted" id="waiting-host" style="text-align:center;margin-top:8px;"></div>
+        <button id="start-btn" class="hidden" style="margin-top:12px;">Begin the trail →</button>
+      </div>
+    </section>
+
+    <!-- Stage -->
+    <section id="screen-stage" class="hidden">
+      <div class="card">
+        <div class="stage-num" id="stage-num"></div>
+        <h2 id="stage-title"></h2>
+        <div class="scene" id="scene"></div>
+        <div class="options" id="options"></div>
+        <div class="muted" id="stage-status" style="margin-top:12px;text-align:center;"></div>
+      </div>
+      <div id="players" class="players"></div>
+    </section>
+
+    <!-- Outcome -->
+    <section id="screen-outcome" class="hidden">
+      <div class="card">
+        <div class="stage-num" id="outcome-stage"></div>
+        <div class="outcome">
+          <div class="gold-pop" id="outcome-gold"></div>
+          <div id="outcome-msg"></div>
+        </div>
+        <h3 style="margin-top:8px;color:var(--muted);font-size:0.85rem;letter-spacing:0.1em;text-transform:uppercase;">What you each chose</h3>
+        <div class="choice-summary" id="choice-summary"></div>
+        <button id="next-btn" class="hidden">Continue Trail →</button>
+      </div>
+      <div id="players" class="players"></div>
+    </section>
+
+    <!-- End -->
+    <section id="screen-end" class="hidden">
+      <div class="card" style="text-align:center;">
+        <h2>The Trail is Done</h2>
+        <p class="muted">The three of you crossed the bridge of light. Beyond, a quiet field at dawn.</p>
+        <div class="gold-pop" style="font-size:2rem;margin:16px 0;color:var(--accent-2);" id="end-total"></div>
+        <div id="end-list" class="players" style="margin-top:16px;"></div>
+        <button id="play-again" class="ghost" style="margin-top:16px;">Walk it again</button>
+      </div>
+    </section>
+  </div>
+
+  <script type="module" src="game.js"></script>
+</body>
+</html>

@@ -1,0 +1,333 @@
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --bg: #0e0a14;
+  --bg-2: #181023;
+  --fg: #ecdcc8;
+  --muted: #8a7a8e;
+  --accent: #c08a3e;
+  --accent-2: #d4a259;
+  --danger: #c45c5c;
+  --scout: #6ec79b;
+  --brawler: #d97455;
+  --mystic: #9b7ed4;
+  --border: #2a1f33;
+}
+
+html, body {
+  background: var(--bg);
+  color: var(--fg);
+  font-family: 'Georgia', 'Times New Roman', serif;
+  min-height: 100vh;
+  line-height: 1.55;
+}
+
+body {
+  background:
+    radial-gradient(circle at 20% 10%, #1a0f24 0%, transparent 50%),
+    radial-gradient(circle at 80% 60%, #14101c 0%, transparent 50%),
+    var(--bg);
+  padding: 24px;
+}
+
+.shell {
+  max-width: 900px;
+  margin: 0 auto;
+}
+
+h1 {
+  font-size: 2.4rem;
+  letter-spacing: 0.08em;
+  text-align: center;
+  margin-bottom: 0.2em;
+  color: var(--accent-2);
+  text-shadow: 0 0 24px rgba(212, 162, 89, 0.3);
+}
+
+h2 {
+  font-size: 1.6rem;
+  color: var(--accent-2);
+  margin-bottom: 0.6em;
+}
+
+.tagline {
+  text-align: center;
+  color: var(--muted);
+  font-style: italic;
+  margin-bottom: 2em;
+}
+
+.card {
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 24px;
+  margin-bottom: 16px;
+  box-shadow: 0 8px 32px rgba(0,0,0,0.4);
+}
+
+label {
+  display: block;
+  color: var(--muted);
+  font-size: 0.85rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  margin-bottom: 0.5em;
+}
+
+input, button, select {
+  font-family: inherit;
+  font-size: 1rem;
+  padding: 12px 16px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--fg);
+  width: 100%;
+}
+
+input:focus, select:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+button {
+  background: var(--accent);
+  color: #1a1208;
+  border: none;
+  font-weight: bold;
+  letter-spacing: 0.05em;
+  cursor: pointer;
+  transition: transform 0.1s, box-shadow 0.1s, background 0.1s;
+}
+
+button:hover:not(:disabled) {
+  background: var(--accent-2);
+  transform: translateY(-1px);
+  box-shadow: 0 4px 16px rgba(212, 162, 89, 0.3);
+}
+
+button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+button.ghost {
+  background: transparent;
+  color: var(--fg);
+  border: 1px solid var(--border);
+}
+
+.row { display: flex; gap: 12px; }
+.row > * { flex: 1; }
+.stack > * + * { margin-top: 12px; }
+
+.role-pick {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 12px;
+  margin-top: 16px;
+}
+
+.role-card {
+  padding: 20px;
+  border-radius: 10px;
+  border: 2px solid var(--border);
+  background: var(--bg);
+  cursor: pointer;
+  text-align: center;
+  transition: all 0.15s;
+}
+
+.role-card.scout { border-color: var(--scout); }
+.role-card.brawler { border-color: var(--brawler); }
+.role-card.mystic { border-color: var(--mystic); }
+
+.role-card:hover { transform: translateY(-2px); }
+
+.role-card.taken {
+  opacity: 0.4;
+  cursor: not-allowed;
+  transform: none !important;
+}
+
+.role-card .glyph {
+  font-size: 2.4rem;
+  display: block;
+  margin-bottom: 8px;
+}
+.role-card.scout .glyph { color: var(--scout); }
+.role-card.brawler .glyph { color: var(--brawler); }
+.role-card.mystic .glyph { color: var(--mystic); }
+
+.role-card .name {
+  font-weight: bold;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  margin-bottom: 4px;
+}
+
+.role-card .desc {
+  font-size: 0.85rem;
+  color: var(--muted);
+  font-style: italic;
+}
+
+.players {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.player-tile {
+  padding: 12px;
+  background: var(--bg);
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  text-align: center;
+}
+
+.player-tile.scout { border-color: var(--scout); }
+.player-tile.brawler { border-color: var(--brawler); }
+.player-tile.mystic { border-color: var(--mystic); }
+
+.player-tile .role-name {
+  font-size: 0.75rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.player-tile .player-name {
+  font-weight: bold;
+  margin: 4px 0;
+}
+
+.player-tile .gold {
+  color: var(--accent-2);
+  font-size: 0.9rem;
+}
+
+.player-tile.locked-in {
+  background: rgba(110, 199, 155, 0.08);
+  position: relative;
+}
+
+.player-tile.locked-in::after {
+  content: '✓';
+  position: absolute;
+  top: 4px;
+  right: 8px;
+  color: var(--scout);
+}
+
+.stage-num {
+  color: var(--muted);
+  font-size: 0.85rem;
+  letter-spacing: 0.15em;
+  text-transform: uppercase;
+}
+
+.scene {
+  font-size: 1.1rem;
+  font-style: italic;
+  margin: 16px 0 24px;
+  padding: 16px;
+  border-left: 3px solid var(--accent);
+  background: rgba(192, 138, 62, 0.05);
+  border-radius: 0 8px 8px 0;
+}
+
+.options {
+  display: grid;
+  gap: 10px;
+}
+
+.option {
+  padding: 14px 16px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  cursor: pointer;
+  text-align: left;
+  color: var(--fg);
+  width: 100%;
+  transition: all 0.1s;
+}
+
+.option:hover { border-color: var(--accent); transform: translateX(4px); }
+.option.picked { border-color: var(--accent-2); background: rgba(212, 162, 89, 0.1); }
+.option.locked { opacity: 0.6; cursor: default; }
+
+.outcome {
+  padding: 20px;
+  border-radius: 10px;
+  background: rgba(212, 162, 89, 0.08);
+  border: 1px solid var(--accent);
+  margin: 16px 0;
+}
+
+.outcome .gold-pop {
+  color: var(--accent-2);
+  font-size: 1.4rem;
+  font-weight: bold;
+  margin-bottom: 8px;
+}
+
+.muted { color: var(--muted); font-size: 0.9rem; }
+
+.room-code {
+  font-family: 'Courier New', monospace;
+  font-size: 2rem;
+  letter-spacing: 0.4em;
+  text-align: center;
+  color: var(--accent-2);
+  margin: 16px 0;
+  user-select: all;
+}
+
+.banner {
+  padding: 10px 16px;
+  border-radius: 8px;
+  background: rgba(196, 92, 92, 0.1);
+  border: 1px solid var(--danger);
+  color: var(--danger);
+  margin-bottom: 16px;
+}
+
+.banner.info {
+  background: rgba(110, 199, 155, 0.08);
+  border-color: var(--scout);
+  color: var(--scout);
+}
+
+.choice-summary {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 12px;
+  margin: 16px 0;
+}
+
+.choice-summary .pick {
+  padding: 10px;
+  background: var(--bg);
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  font-size: 0.9rem;
+}
+
+.choice-summary .pick .who {
+  font-size: 0.75rem;
+  color: var(--muted);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.hidden { display: none !important; }
+
+@media (max-width: 700px) {
+  .role-pick, .players, .choice-summary { grid-template-columns: 1fr; }
+  .row { flex-direction: column; }
+  h1 { font-size: 1.8rem; }
+}
