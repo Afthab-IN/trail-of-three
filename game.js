@@ -1,222 +1,94 @@
 import * as THREE from "https://esm.sh/three@0.160.0";
-import { PointerLockControls } from "https://esm.sh/three@0.160.0/examples/jsm/controls/PointerLockControls.js";
 import { EffectComposer } from "https://esm.sh/three@0.160.0/examples/jsm/postprocessing/EffectComposer.js";
 import { RenderPass } from "https://esm.sh/three@0.160.0/examples/jsm/postprocessing/RenderPass.js";
 import { UnrealBloomPass } from "https://esm.sh/three@0.160.0/examples/jsm/postprocessing/UnrealBloomPass.js";
 import { OutputPass } from "https://esm.sh/three@0.160.0/examples/jsm/postprocessing/OutputPass.js";
 
-import { WORLD, heightAt, isWater, buildTerrainGeometry, placeProps, placeEntities } from "./world.js";
+import { TRACKS, TRACK_WIDTH, buildTrackGeometry, nearestOnTrack, CHECKPOINT_COUNT } from "./track.js";
+import { Car, COLORS } from "./car.js";
+import { AIDriver } from "./ai.js";
 import { Net, makeRoomCode } from "./net.js";
 import {
-  sfxSwordSwing, sfxHit, sfxEnemyDeath, sfxPlayerHurt, sfxFireball, sfxFireballHit,
-  sfxPickup, sfxPotion, sfxJump, sfxFootstep, sfxDragonRoar, sfxVictory, unlockAudio,
+  setEngine, silenceEngine, setScreech, stopScreech,
+  sfxCollision, sfxBoost, sfxCountdownBeep, sfxLap, sfxFinish, unlockAudio,
 } from "./audio.js";
 import {
-  spawnParticleBurst, spawnTrailParticle, updateParticles,
-  spawnDamageNumber, updateDamageNumbers,
-  cameraShake, applyCameraShake,
-  spawnFireflies, updateFireflies,
+  spawnSmoke, spawnSparks, spawnDust, spawnBoostTrail,
+  updateParticles, cameraShake, applyCameraShake,
 } from "./fx.js";
 
-// ============================================================
+// =============================================================
 //  State
-// ============================================================
+// =============================================================
 const state = {
   renderer: null,
   scene: null,
   camera: null,
-  controls: null,
-  clock: new THREE.Clock(),
-  keys: {},
-  mouseDown: false,
-
-  net: new Net(),
-  isHost: false,
-  myId: null,
-  myName: "",
-  roomCode: null,
-
-  // Local player movement
-  vel: new THREE.Vector3(),
-  onGround: true,
-  swingT: 0,                // sword swing timer (0 = idle, >0 active)
-  attackCd: 0,              // seconds left before next swing
-  hp: 100,
-  maxHp: 100,
-  mp: 50,
-  maxMp: 50,
-  manaRegen: 6,             // per second
-  hpPotions: 1,
-  gold: 0,
-  alive: true,
-  lastHurtAt: 0,
-  respawnAt: 0,
-  footstepT: 0,
-  fireballCd: 0,
   composer: null,
   bloom: null,
-  sun: null,
-  hemiLight: null,
-  dayT: 0.30,               // 0 = midnight, 0.5 = noon, 1 = midnight
-  fireballs: [],            // { mesh, dir, life, owner, target? }
-  lootDrops: {},            // id -> { type, x, z, mesh }
-  trailEmit: 0,
+  clock: new THREE.Clock(),
+  themeGroup: null,
+  trackGroup: null,
+  trackData: null,
+  trackId: "vale",
 
-  // Remote players: id -> { name, mesh, x, y, z, rotY, hp, maxHp, gold, alive, tx, ty, tz, lastUpdate }
-  players: {},
+  net: new Net(),
+  myId: null,
+  myName: "Driver",
+  myColor: COLORS[0],
+  roomCode: null,
+  isHost: false,
+  solo: false,
 
-  // Entities (host-authoritative): id -> entity data
-  entities: {},
+  phase: "title",          // title | track-pick | lobby | countdown | racing | finished
+  cars: {},                // id -> Car
+  aiDrivers: [],
+  myCar: null,
+  countdownT: 0,
+  countdownStep: -1,
+  raceStartT: 0,
+  totalLaps: 3,
 
-  // Visual meshes per entity id
-  entityMeshes: {},
-
-  // World state
-  worldSeed: null,
-  bossAggro: false,
-  phase: "title",    // title | lobby | playing | won | lost
-  finished: false,
-
-  // Networking timing
+  keys: {},
+  cameraMode: 0,           // 0 chase, 1 cockpit, 2 top
+  minimapCtx: null,
   lastPosBroadcast: 0,
-  lastHostTick: 0,
 
-  // Sword mesh attached to camera
-  sword: null,
+  // host-only — but we don't really need authority since each client tracks own race progress.
 };
 
 const $ = (s) => document.querySelector(s);
-const TMP_V = new THREE.Vector3();
-const TMP_V2 = new THREE.Vector3();
-const PLAYER_HEIGHT = 1.7;
-const PLAYER_RADIUS = 0.45;
-const GRAVITY = 22;
-const JUMP_VEL = 8;
-const WALK_SPEED = 5.5;
-const SPRINT_SPEED = 9.5;
-const ATTACK_RANGE = 3.2;
-const ATTACK_DMG = 18;
-const ATTACK_CD = 0.55;
 
-// ============================================================
+// =============================================================
 //  Scene setup
-// ============================================================
+// =============================================================
 function initScene() {
   const canvas = $("#scene");
   state.renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
   state.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
   state.renderer.setSize(window.innerWidth, window.innerHeight);
 
-  const scene = new THREE.Scene();
-  scene.background = new THREE.Color(0x88a0c0);
-  scene.fog = new THREE.Fog(0x88a0c0, 80, 240);
-  state.scene = scene;
+  state.scene = new THREE.Scene();
 
-  const camera = new THREE.PerspectiveCamera(74, window.innerWidth / window.innerHeight, 0.1, 500);
-  camera.position.set(WORLD.SPAWN.x, 5, WORLD.SPAWN.z);
-  state.camera = camera;
+  state.camera = new THREE.PerspectiveCamera(74, window.innerWidth / window.innerHeight, 0.1, 1200);
+  state.camera.position.set(0, 8, 14);
+  state.camera.lookAt(0, 0, 0);
 
-  // Hemisphere + directional sun (controlled by day/night cycle)
-  const hemi = new THREE.HemisphereLight(0xb0c8e8, 0x2a2418, 0.65);
-  scene.add(hemi);
-  state.hemiLight = hemi;
-
-  const sun = new THREE.DirectionalLight(0xfff0c8, 1.0);
-  sun.position.set(120, 180, 60);
-  scene.add(sun);
-  state.sun = sun;
-
-  // Post-processing — selective bloom on emissive things (lanterns, gold, fireballs, eyes)
-  const composer = new EffectComposer(state.renderer);
-  composer.addPass(new RenderPass(scene, camera));
-  const bloom = new UnrealBloomPass(
+  // Composer + bloom
+  state.composer = new EffectComposer(state.renderer);
+  state.composer.addPass(new RenderPass(state.scene, state.camera));
+  state.bloom = new UnrealBloomPass(
     new THREE.Vector2(window.innerWidth, window.innerHeight),
-    0.85,   // strength
-    0.55,   // radius
-    0.78    // threshold
+    0.6, 0.5, 0.85
   );
-  composer.addPass(bloom);
-  composer.addPass(new OutputPass());
-  state.composer = composer;
-  state.bloom = bloom;
+  state.composer.addPass(state.bloom);
+  state.composer.addPass(new OutputPass());
 
-  // Sky dome — large back sphere with gradient
-  const skyGeo = new THREE.SphereGeometry(400, 24, 16);
-  const skyMat = new THREE.ShaderMaterial({
-    side: THREE.BackSide,
-    uniforms: {
-      topColor:    { value: new THREE.Color(0x4a6a9e) },
-      bottomColor: { value: new THREE.Color(0xc8b8a0) },
-    },
-    vertexShader: `
-      varying vec3 vWorldPos;
-      void main() {
-        vec4 wp = modelMatrix * vec4(position, 1.0);
-        vWorldPos = wp.xyz;
-        gl_Position = projectionMatrix * viewMatrix * wp;
-      }
-    `,
-    fragmentShader: `
-      uniform vec3 topColor;
-      uniform vec3 bottomColor;
-      varying vec3 vWorldPos;
-      void main() {
-        float h = normalize(vWorldPos).y;
-        float t = smoothstep(-0.1, 0.5, h);
-        gl_FragColor = vec4(mix(bottomColor, topColor, t), 1.0);
-      }
-    `,
-    depthWrite: false,
-  });
-  const sky = new THREE.Mesh(skyGeo, skyMat);
-  scene.add(sky);
+  state.themeGroup = new THREE.Group();
+  state.scene.add(state.themeGroup);
 
-  // Terrain
-  const terrainGeo = buildTerrainGeometry();
-  const terrainMat = new THREE.MeshLambertMaterial({ vertexColors: true });
-  const terrain = new THREE.Mesh(terrainGeo, terrainMat);
-  scene.add(terrain);
-
-  // Water — large blue plane at y=-1.4
-  const waterGeo = new THREE.PlaneGeometry(WORLD.SIZE * 2, WORLD.SIZE * 2);
-  const waterMat = new THREE.MeshStandardMaterial({
-    color: 0x2a5a7a,
-    transparent: true,
-    opacity: 0.78,
-    roughness: 0.5,
-    metalness: 0.1,
-  });
-  const water = new THREE.Mesh(waterGeo, waterMat);
-  water.rotation.x = -Math.PI / 2;
-  water.position.y = -1.3;
-  scene.add(water);
-
-  // Trees and rocks
-  buildPropsForSeed(state.worldSeed ?? 20260513);
-
-  // Fireflies float through the spawn-camp area for ambient life
-  spawnFireflies(scene, 70, { x: 80, z: 80 });
-
-  // Spawn camp marker — wooden sign + campfire
-  buildSpawnCamp();
-
-  // Boss platform — flat stone ring at the peak
-  buildBossPlatform();
-
-  // Camera-attached sword
-  buildSword();
-
-  // Controls
-  state.controls = new PointerLockControls(camera, state.renderer.domElement);
-  scene.add(state.controls.getObject());
-  state.controls.getObject().position.set(WORLD.SPAWN.x, heightAt(WORLD.SPAWN.x, WORLD.SPAWN.z) + PLAYER_HEIGHT, WORLD.SPAWN.z);
-
-  state.controls.addEventListener("lock", () => {
-    if (state.phase === "playing") $("#hud").classList.remove("hidden");
-  });
-  state.controls.addEventListener("unlock", () => {
-    // Keep HUD visible during gameplay; just don't accept input
-  });
+  // Title cam: orbit a placeholder
+  buildPreviewScene();
 
   window.addEventListener("resize", onResize);
 }
@@ -225,1167 +97,778 @@ function onResize() {
   state.camera.aspect = window.innerWidth / window.innerHeight;
   state.camera.updateProjectionMatrix();
   state.renderer.setSize(window.innerWidth, window.innerHeight);
-  if (state.composer) state.composer.setSize(window.innerWidth, window.innerHeight);
-  if (state.bloom) state.bloom.setSize(window.innerWidth, window.innerHeight);
+  state.composer.setSize(window.innerWidth, window.innerHeight);
+  state.bloom.setSize(window.innerWidth, window.innerHeight);
 }
 
-// ============================================================
-//  Props (instanced trees + rocks)
-// ============================================================
-let propsGroup = null;
+function clearGroup(g) {
+  while (g.children.length) {
+    const c = g.children.pop();
+    g.remove(c);
+    if (c.geometry) c.geometry.dispose?.();
+    if (c.material) {
+      if (Array.isArray(c.material)) c.material.forEach(m => m.dispose?.());
+      else c.material.dispose?.();
+    }
+  }
+}
 
-function buildPropsForSeed(seed) {
-  if (propsGroup) state.scene.remove(propsGroup);
-  propsGroup = new THREE.Group();
-  state.scene.add(propsGroup);
+// Build a moody background for the title screen.
+function buildPreviewScene() {
+  const scene = state.scene;
+  scene.background = new THREE.Color(0x0a0c14);
+  scene.fog = new THREE.FogExp2(0x0a0c14, 0.02);
+  const amb = new THREE.AmbientLight(0x404060, 0.4);
+  state.themeGroup.add(amb);
+  const key = new THREE.DirectionalLight(0xff8030, 1.2);
+  key.position.set(20, 10, 20);
+  state.themeGroup.add(key);
+  // A floating preview car
+  const previewCar = new Car({ id: "preview", name: "", color: COLORS[0], scene: state.scene });
+  previewCar.mesh.userData.label.visible = false;
+  state.previewCar = previewCar;
+}
 
-  const props = placeProps(seed);
-  state.treeColliders = [];
+function rebuildTheme(theme) {
+  clearGroup(state.themeGroup);
+  state.scene.background = new THREE.Color(theme.sky);
+  state.scene.fog = new THREE.Fog(theme.fogColor, theme.fogNear, theme.fogFar);
 
-  // Tree trunks (instanced cylinder)
-  const trunkGeo = new THREE.CylinderGeometry(0.35, 0.55, 5, 6);
-  const trunkMat = new THREE.MeshLambertMaterial({ color: 0x2a1a10 });
-  const trunkInst = new THREE.InstancedMesh(trunkGeo, trunkMat, props.trees.length + props.bigTrees.length);
-  // Tree canopy (instanced cone)
-  const canopyGeo = new THREE.ConeGeometry(2.2, 5, 6);
-  const canopyMat = new THREE.MeshLambertMaterial({ color: 0x1f3a16 });
-  const canopyInst = new THREE.InstancedMesh(canopyGeo, canopyMat, props.trees.length + props.bigTrees.length);
+  const amb = new THREE.HemisphereLight(theme.hemiTop, theme.hemiBot, theme.hemiInt);
+  state.themeGroup.add(amb);
 
+  const sun = new THREE.DirectionalLight(theme.sunColor, theme.sunInt);
+  sun.position.set(...theme.sunPos);
+  state.themeGroup.add(sun);
+
+  state.bloom.strength = theme.bloomStrength;
+  state.bloom.threshold = theme.bloomThreshold;
+  state.bloom.radius = 0.55;
+}
+
+// =============================================================
+//  Track + props
+// =============================================================
+function buildTrack(trackId) {
+  const track = TRACKS[trackId];
+  state.trackId = trackId;
+  state.totalLaps = track.laps;
+
+  // Clear old track
+  if (state.trackGroup) {
+    clearGroup(state.trackGroup);
+    state.scene.remove(state.trackGroup);
+  }
+  state.trackGroup = new THREE.Group();
+  state.scene.add(state.trackGroup);
+
+  rebuildTheme(track.theme);
+  buildGround(track);
+
+  const data = buildTrackGeometry(track);
+  state.trackData = data;
+
+  // Road
+  const roadMat = track.id === "neon"
+    ? new THREE.MeshStandardMaterial({ color: 0x080812, roughness: 0.4, metalness: 0.3 })
+    : new THREE.MeshStandardMaterial({ color: 0x1a1820, roughness: 0.9, metalness: 0.0 });
+  const road = new THREE.Mesh(data.roadGeo, roadMat);
+  state.trackGroup.add(road);
+
+  // Walls
+  const wallMat = track.theme.wallEmissive
+    ? new THREE.MeshStandardMaterial({
+        color: track.theme.wallEmissive, emissive: track.theme.wallEmissive,
+        emissiveIntensity: 1.6,
+      })
+    : new THREE.MeshStandardMaterial({ color: 0xd0d0d0, roughness: 0.6, metalness: 0.3 });
+  const lw = new THREE.Mesh(data.leftWall, wallMat);
+  const rw = new THREE.Mesh(data.rightWall, wallMat);
+  state.trackGroup.add(lw, rw);
+
+  // Center line dashes (decorative)
+  const dashMat = new THREE.MeshBasicMaterial({ color: 0xffffaa });
+  for (let i = 0; i < data.samples.length; i += 10) {
+    const s = data.samples[i];
+    const dash = new THREE.Mesh(new THREE.PlaneGeometry(0.25, 1.6), dashMat);
+    dash.position.set(s.p.x, s.p.y + 0.08, s.p.z);
+    dash.rotation.x = -Math.PI / 2;
+    dash.rotation.z = -Math.atan2(s.tan.x, s.tan.z);
+    state.trackGroup.add(dash);
+  }
+
+  // Start/finish line
+  const finishMat = new THREE.MeshBasicMaterial({ color: 0xffffff });
+  const start = data.samples[0];
+  const finishLine = new THREE.Mesh(new THREE.PlaneGeometry(TRACK_WIDTH, 0.6), finishMat);
+  finishLine.position.set(start.p.x, start.p.y + 0.1, start.p.z);
+  finishLine.rotation.x = -Math.PI / 2;
+  finishLine.rotation.z = -Math.atan2(start.tan.x, start.tan.z);
+  state.trackGroup.add(finishLine);
+  // Checkered overlay using grid sub-strips
+  for (let i = 0; i < 8; i++) {
+    const block = new THREE.Mesh(
+      new THREE.PlaneGeometry(TRACK_WIDTH / 8, 0.3),
+      new THREE.MeshBasicMaterial({ color: i % 2 ? 0x000000 : 0xffffff })
+    );
+    block.position.set(start.p.x, start.p.y + 0.11, start.p.z);
+    // Offset laterally along track right
+    const offX = ((i + 0.5) / 8 - 0.5) * TRACK_WIDTH;
+    block.position.x += start.right.x * offX;
+    block.position.z += start.right.z * offX;
+    block.rotation.x = -Math.PI / 2;
+    block.rotation.z = -Math.atan2(start.tan.x, start.tan.z);
+    state.trackGroup.add(block);
+  }
+
+  // Theme-specific props
+  if (track.theme.props === "forest") placeForestProps(data, track.theme);
+  else if (track.theme.props === "desert") placeDesertProps(data, track.theme);
+  else if (track.theme.props === "neon") placeNeonProps(data, track.theme);
+
+  // Place camera initially at start
+  positionCarsAtStart();
+  updateChaseCamera(0.016);
+}
+
+function buildGround(track) {
+  const SIZE = 1400;
+  const geo = new THREE.PlaneGeometry(SIZE, SIZE, 80, 80);
+  // Slight noise based on theme
+  const pos = geo.attributes.position;
+  const bumpScale = track.theme.groundBumpScale ?? 1.5;
+  for (let i = 0; i < pos.count; i++) {
+    const x = pos.getX(i);
+    const y = pos.getY(i);
+    let h = Math.sin(x * 0.012) * bumpScale + Math.cos(y * 0.014) * bumpScale;
+    h += Math.sin((x + y) * 0.03) * bumpScale * 0.5;
+    pos.setZ(i, h);
+  }
+  geo.computeVertexNormals();
+  const mat = new THREE.MeshStandardMaterial({ color: track.theme.ground, roughness: 1.0 });
+  const ground = new THREE.Mesh(geo, mat);
+  ground.rotation.x = -Math.PI / 2;
+  ground.position.y = -0.2;
+  state.trackGroup.add(ground);
+}
+
+function placeForestProps(data, theme) {
+  // Instanced trees scattered outside the track
+  const positions = [];
+  const rng = seededRng(0x42);
+  for (let i = 0; i < 600; i++) {
+    const x = (rng() - 0.5) * 1200;
+    const z = (rng() - 0.5) * 1200;
+    // skip if too close to track
+    const near = nearestOnTrack(data.samples, x, z);
+    if (near.dist < 16) continue;
+    positions.push({ x, z, s: 0.8 + rng() * 0.8, r: rng() * Math.PI * 2 });
+  }
+  const trunkGeo = new THREE.CylinderGeometry(0.4, 0.55, 6, 6);
+  const trunkMat = new THREE.MeshLambertMaterial({ color: theme.trunkColor });
+  const trunkInst = new THREE.InstancedMesh(trunkGeo, trunkMat, positions.length);
+  const canopyGeo = new THREE.ConeGeometry(2.6, 6, 6);
+  const canopyMat = new THREE.MeshLambertMaterial({ color: theme.treeColor });
+  const canopyInst = new THREE.InstancedMesh(canopyGeo, canopyMat, positions.length);
   const m = new THREE.Matrix4();
   const q = new THREE.Quaternion();
   const eul = new THREE.Euler();
-  const s = new THREE.Vector3();
+  const sc = new THREE.Vector3();
   const p = new THREE.Vector3();
-
-  let idx = 0;
-  for (const t of [...props.trees, ...props.bigTrees]) {
-    const trunkH = 5 * t.scale;
-    const canopyH = 5 * t.scale;
-    eul.set(0, t.rot, 0);
-    q.setFromEuler(eul);
-
-    // Trunk
-    p.set(t.x, t.y + trunkH / 2, t.z);
-    s.set(t.scale, t.scale, t.scale);
-    m.compose(p, q, s);
-    trunkInst.setMatrixAt(idx, m);
-
-    // Canopy
-    p.set(t.x, t.y + trunkH + canopyH / 2 - 0.4, t.z);
-    m.compose(p, q, s);
-    canopyInst.setMatrixAt(idx, m);
-
-    state.treeColliders.push({ x: t.x, z: t.z, r: 0.6 * t.scale });
-    idx++;
-  }
+  positions.forEach((pp, i) => {
+    eul.set(0, pp.r, 0); q.setFromEuler(eul);
+    p.set(pp.x, 3 * pp.s, pp.z); sc.set(pp.s, pp.s, pp.s);
+    m.compose(p, q, sc); trunkInst.setMatrixAt(i, m);
+    p.set(pp.x, 6 * pp.s + 0.6, pp.z);
+    m.compose(p, q, sc); canopyInst.setMatrixAt(i, m);
+  });
   trunkInst.instanceMatrix.needsUpdate = true;
   canopyInst.instanceMatrix.needsUpdate = true;
-  propsGroup.add(trunkInst);
-  propsGroup.add(canopyInst);
+  state.trackGroup.add(trunkInst); state.trackGroup.add(canopyInst);
+}
 
-  // Rocks (instanced dodecahedron)
-  const rockGeo = new THREE.DodecahedronGeometry(0.7, 0);
-  const rockMat = new THREE.MeshLambertMaterial({ color: 0x4a4a52 });
-  const rockInst = new THREE.InstancedMesh(rockGeo, rockMat, props.rocks.length);
-  let ri = 0;
-  for (const r of props.rocks) {
-    eul.set(r.rot * 0.5, r.rot, r.rot * 0.3);
-    q.setFromEuler(eul);
-    p.set(r.x, r.y + 0.3, r.z);
-    s.set(r.scale, r.scale * 0.7, r.scale);
-    m.compose(p, q, s);
-    rockInst.setMatrixAt(ri, m);
-    if (r.scale > 1.0) state.treeColliders.push({ x: r.x, z: r.z, r: 0.5 * r.scale });
-    ri++;
+function placeDesertProps(data, theme) {
+  const rng = seededRng(0x99);
+  // Cacti and rocks
+  const cactusGeo = new THREE.CylinderGeometry(0.5, 0.6, 3, 5);
+  const cactusMat = new THREE.MeshLambertMaterial({ color: 0x5a7d3a });
+  const rockGeo = new THREE.DodecahedronGeometry(1, 0);
+  const rockMat = new THREE.MeshLambertMaterial({ color: 0xa68056 });
+
+  const cacti = [];
+  const rocks = [];
+  for (let i = 0; i < 240; i++) {
+    const x = (rng() - 0.5) * 1400;
+    const z = (rng() - 0.5) * 1400;
+    const near = nearestOnTrack(data.samples, x, z);
+    if (near.dist < 15) continue;
+    if (rng() < 0.5) cacti.push({ x, z, s: 0.6 + rng() * 0.9 });
+    else rocks.push({ x, z, s: 0.5 + rng() * 1.4, r: rng() * Math.PI * 2 });
   }
+
+  const cactusInst = new THREE.InstancedMesh(cactusGeo, cactusMat, cacti.length);
+  const rockInst = new THREE.InstancedMesh(rockGeo, rockMat, rocks.length);
+  const m = new THREE.Matrix4(); const q = new THREE.Quaternion();
+  const eul = new THREE.Euler(); const sc = new THREE.Vector3(); const p = new THREE.Vector3();
+  cacti.forEach((c, i) => {
+    p.set(c.x, 1.5 * c.s, c.z); sc.set(c.s, c.s, c.s);
+    eul.set(0, 0, 0); q.setFromEuler(eul);
+    m.compose(p, q, sc); cactusInst.setMatrixAt(i, m);
+  });
+  rocks.forEach((r, i) => {
+    p.set(r.x, 0.5 * r.s, r.z); sc.set(r.s, r.s * 0.6, r.s);
+    eul.set(r.r * 0.3, r.r, r.r * 0.5); q.setFromEuler(eul);
+    m.compose(p, q, sc); rockInst.setMatrixAt(i, m);
+  });
+  cactusInst.instanceMatrix.needsUpdate = true;
   rockInst.instanceMatrix.needsUpdate = true;
-  propsGroup.add(rockInst);
+  state.trackGroup.add(cactusInst); state.trackGroup.add(rockInst);
+
+  // Distant dunes (low gradient cones)
+  const duneMat = new THREE.MeshLambertMaterial({ color: 0xb87a4a });
+  for (let i = 0; i < 22; i++) {
+    const a = (i / 22) * Math.PI * 2;
+    const dist = 480 + rng() * 240;
+    const d = new THREE.Mesh(new THREE.ConeGeometry(60 + rng() * 40, 28 + rng() * 20, 7), duneMat);
+    d.position.set(Math.cos(a) * dist, 14, Math.sin(a) * dist);
+    state.trackGroup.add(d);
+  }
 }
 
-function buildSpawnCamp() {
-  // Sign post
-  const post = new THREE.Mesh(
-    new THREE.CylinderGeometry(0.1, 0.1, 2.5, 5),
-    new THREE.MeshLambertMaterial({ color: 0x3a2615 })
-  );
-  post.position.set(WORLD.SPAWN.x + 1.5, heightAt(WORLD.SPAWN.x + 1.5, WORLD.SPAWN.z) + 1.25, WORLD.SPAWN.z);
-  state.scene.add(post);
-
-  // Sign board
-  const board = new THREE.Mesh(
-    new THREE.BoxGeometry(1.4, 0.8, 0.08),
-    new THREE.MeshLambertMaterial({ color: 0x5a3c20 })
-  );
-  board.position.set(WORLD.SPAWN.x + 1.5, heightAt(WORLD.SPAWN.x + 1.5, WORLD.SPAWN.z) + 2.2, WORLD.SPAWN.z);
-  state.scene.add(board);
-
-  // Campfire stones
-  const stoneMat = new THREE.MeshLambertMaterial({ color: 0x4a4a52 });
-  for (let i = 0; i < 6; i++) {
-    const a = (i / 6) * Math.PI * 2;
-    const stone = new THREE.Mesh(new THREE.DodecahedronGeometry(0.25, 0), stoneMat);
-    stone.position.set(
-      WORLD.SPAWN.x + Math.cos(a) * 0.8,
-      heightAt(WORLD.SPAWN.x + Math.cos(a) * 0.8, WORLD.SPAWN.z + Math.sin(a) * 0.8) + 0.25,
-      WORLD.SPAWN.z + Math.sin(a) * 0.8
+function placeNeonProps(data, theme) {
+  const rng = seededRng(0xC0FFEE);
+  // Tall thin neon "buildings"
+  for (let i = 0; i < 90; i++) {
+    const x = (rng() - 0.5) * 900;
+    const z = (rng() - 0.5) * 900;
+    const near = nearestOnTrack(data.samples, x, z);
+    if (near.dist < 28) continue;
+    const h = 12 + rng() * 80;
+    const w = 6 + rng() * 12;
+    const hue = rng() < 0.5 ? 0xff20a0 : (rng() < 0.5 ? 0x20a0ff : 0x80ffa0);
+    const building = new THREE.Mesh(
+      new THREE.BoxGeometry(w, h, w),
+      new THREE.MeshStandardMaterial({ color: 0x080812, emissive: 0x040408 })
     );
-    state.scene.add(stone);
-  }
-  // Fire — emissive sphere + point light
-  const fire = new THREE.Mesh(
-    new THREE.SphereGeometry(0.3, 8, 6),
-    new THREE.MeshBasicMaterial({ color: 0xff8c30 })
-  );
-  fire.position.set(WORLD.SPAWN.x, heightAt(WORLD.SPAWN.x, WORLD.SPAWN.z) + 0.4, WORLD.SPAWN.z);
-  state.scene.add(fire);
-  state.fireMesh = fire;
-  const fireLight = new THREE.PointLight(0xff8c30, 1.8, 18, 2);
-  fireLight.position.copy(fire.position);
-  fireLight.position.y += 0.4;
-  state.scene.add(fireLight);
-  state.fireLight = fireLight;
-}
-
-function buildBossPlatform() {
-  const ringMat = new THREE.MeshLambertMaterial({ color: 0x6a5e4a });
-  // Flat top
-  const top = new THREE.Mesh(new THREE.CylinderGeometry(WORLD.PEAK.r * 0.6, WORLD.PEAK.r * 0.65, 1.5, 18), ringMat);
-  top.position.set(WORLD.PEAK.x, heightAt(WORLD.PEAK.x, WORLD.PEAK.z) + 1.0, WORLD.PEAK.z);
-  state.scene.add(top);
-
-  // Standing stones around the perimeter
-  for (let i = 0; i < 8; i++) {
-    const a = (i / 8) * Math.PI * 2;
-    const sx = WORLD.PEAK.x + Math.cos(a) * (WORLD.PEAK.r * 0.55);
-    const sz = WORLD.PEAK.z + Math.sin(a) * (WORLD.PEAK.r * 0.55);
-    const sy = heightAt(sx, sz);
-    const stone = new THREE.Mesh(new THREE.BoxGeometry(1.3, 4, 0.8), new THREE.MeshLambertMaterial({ color: 0x3a3540 }));
-    stone.position.set(sx, sy + 2, sz);
-    stone.rotation.y = a + Math.PI / 2;
-    state.scene.add(stone);
-  }
-}
-
-function buildSword() {
-  const swordGroup = new THREE.Group();
-
-  const blade = new THREE.Mesh(
-    new THREE.BoxGeometry(0.06, 0.06, 0.9),
-    new THREE.MeshStandardMaterial({ color: 0xcccccc, metalness: 0.7, roughness: 0.3 })
-  );
-  blade.position.set(0, 0, -0.45);
-  swordGroup.add(blade);
-
-  const guard = new THREE.Mesh(
-    new THREE.BoxGeometry(0.3, 0.06, 0.06),
-    new THREE.MeshStandardMaterial({ color: 0x8a6a3a, metalness: 0.6 })
-  );
-  swordGroup.add(guard);
-
-  const hilt = new THREE.Mesh(
-    new THREE.CylinderGeometry(0.04, 0.04, 0.2, 6),
-    new THREE.MeshStandardMaterial({ color: 0x3a2615 })
-  );
-  hilt.rotation.x = Math.PI / 2;
-  hilt.position.set(0, 0, 0.1);
-  swordGroup.add(hilt);
-
-  // Position relative to camera (right hand)
-  swordGroup.position.set(0.32, -0.28, -0.4);
-  swordGroup.rotation.set(0, -0.05, 0);
-  state.camera.add(swordGroup);
-  state.sword = swordGroup;
-}
-
-// ============================================================
-//  Entity meshes
-// ============================================================
-function makeEntityMesh(e) {
-  let mesh;
-  if (e.type === "wolf") {
-    const g = new THREE.Group();
-    const body = new THREE.Mesh(new THREE.BoxGeometry(0.7, 0.5, 1.2), new THREE.MeshLambertMaterial({ color: 0x3a3540 }));
-    body.position.y = 0.5;
-    g.add(body);
-    const head = new THREE.Mesh(new THREE.BoxGeometry(0.4, 0.4, 0.5), new THREE.MeshLambertMaterial({ color: 0x4a4248 }));
-    head.position.set(0, 0.65, 0.7);
-    g.add(head);
-    for (let i = 0; i < 4; i++) {
-      const leg = new THREE.Mesh(new THREE.BoxGeometry(0.12, 0.4, 0.12), new THREE.MeshLambertMaterial({ color: 0x2a2530 }));
-      leg.position.set(i % 2 ? 0.25 : -0.25, 0.2, i < 2 ? 0.4 : -0.4);
-      g.add(leg);
-    }
-    mesh = g;
-  } else if (e.type === "skeleton") {
-    const g = new THREE.Group();
-    const body = new THREE.Mesh(new THREE.BoxGeometry(0.5, 1.0, 0.3), new THREE.MeshLambertMaterial({ color: 0xc8b8a0 }));
-    body.position.y = 0.7;
-    g.add(body);
-    const head = new THREE.Mesh(new THREE.SphereGeometry(0.25, 8, 8), new THREE.MeshLambertMaterial({ color: 0xe8d8b8 }));
-    head.position.y = 1.5;
-    g.add(head);
-    for (let i = 0; i < 2; i++) {
-      const arm = new THREE.Mesh(new THREE.BoxGeometry(0.12, 0.8, 0.12), new THREE.MeshLambertMaterial({ color: 0xc8b8a0 }));
-      arm.position.set(i ? 0.32 : -0.32, 0.7, 0);
-      g.add(arm);
-      const leg = new THREE.Mesh(new THREE.BoxGeometry(0.14, 0.7, 0.14), new THREE.MeshLambertMaterial({ color: 0xc8b8a0 }));
-      leg.position.set(i ? 0.13 : -0.13, 0.0, 0);
-      g.add(leg);
-    }
-    mesh = g;
-  } else if (e.type === "troll") {
-    const g = new THREE.Group();
-    const body = new THREE.Mesh(new THREE.BoxGeometry(1.4, 1.6, 0.9), new THREE.MeshLambertMaterial({ color: 0x4a5a3a }));
-    body.position.y = 1.2;
-    g.add(body);
-    const head = new THREE.Mesh(new THREE.SphereGeometry(0.55, 10, 8), new THREE.MeshLambertMaterial({ color: 0x5a6a4a }));
-    head.position.y = 2.4;
-    g.add(head);
-    for (let i = 0; i < 2; i++) {
-      const arm = new THREE.Mesh(new THREE.BoxGeometry(0.35, 1.5, 0.35), new THREE.MeshLambertMaterial({ color: 0x4a5a3a }));
-      arm.position.set(i ? 0.9 : -0.9, 1.2, 0);
-      g.add(arm);
-    }
-    mesh = g;
-  } else if (e.type === "dragon") {
-    const g = new THREE.Group();
-    const body = new THREE.Mesh(new THREE.BoxGeometry(3.0, 1.8, 6.0), new THREE.MeshLambertMaterial({ color: 0x4a2235 }));
-    body.position.y = 1.5;
-    g.add(body);
-    const head = new THREE.Mesh(new THREE.BoxGeometry(1.5, 1.2, 1.6), new THREE.MeshLambertMaterial({ color: 0x5a2c40 }));
-    head.position.set(0, 2.0, 3.6);
-    g.add(head);
-    // Wings (folded)
-    for (let i = 0; i < 2; i++) {
-      const wing = new THREE.Mesh(new THREE.BoxGeometry(0.2, 1.4, 3.6), new THREE.MeshLambertMaterial({ color: 0x3a1828 }));
-      wing.position.set(i ? 1.8 : -1.8, 2.2, 0);
-      wing.rotation.z = (i ? 1 : -1) * 0.5;
-      g.add(wing);
-    }
-    // Tail
-    const tail = new THREE.Mesh(new THREE.ConeGeometry(0.5, 3, 6), new THREE.MeshLambertMaterial({ color: 0x4a2235 }));
-    tail.position.set(0, 1.0, -4.5);
-    tail.rotation.x = -Math.PI / 2;
-    g.add(tail);
-    // Glowing eyes
-    for (let i = 0; i < 2; i++) {
-      const eye = new THREE.Mesh(new THREE.SphereGeometry(0.08, 6, 6), new THREE.MeshBasicMaterial({ color: 0xff4030 }));
-      eye.position.set(i ? 0.4 : -0.4, 2.2, 4.3);
-      g.add(eye);
-    }
-    mesh = g;
-  } else if (e.type === "gold_pile") {
-    mesh = new THREE.Mesh(
-      new THREE.SphereGeometry(0.3, 10, 8),
-      new THREE.MeshStandardMaterial({ color: 0xf5c97a, emissive: 0xf5c97a, emissiveIntensity: 0.6, metalness: 0.8 })
+    building.position.set(x, h / 2, z);
+    state.trackGroup.add(building);
+    // Neon strip on top
+    const stripe = new THREE.Mesh(
+      new THREE.BoxGeometry(w * 0.95, 0.4, w * 0.95),
+      new THREE.MeshStandardMaterial({ color: hue, emissive: hue, emissiveIntensity: 2.0 })
     );
-  } else if (e.type === "chest") {
-    const g = new THREE.Group();
-    const base = new THREE.Mesh(new THREE.BoxGeometry(0.9, 0.6, 0.6), new THREE.MeshLambertMaterial({ color: 0x5a3c20 }));
-    base.position.y = 0.3;
-    g.add(base);
-    const lid = new THREE.Mesh(new THREE.BoxGeometry(0.95, 0.2, 0.6), new THREE.MeshLambertMaterial({ color: 0x6a4828 }));
-    lid.position.y = 0.7;
-    g.add(lid);
-    const lock = new THREE.Mesh(new THREE.BoxGeometry(0.12, 0.16, 0.05), new THREE.MeshStandardMaterial({ color: 0xc08a3e, emissive: 0xc08a3e, emissiveIntensity: 0.3 }));
-    lock.position.set(0, 0.5, 0.32);
-    g.add(lock);
-    mesh = g;
-  } else {
-    mesh = new THREE.Mesh(new THREE.SphereGeometry(0.5, 6, 6), new THREE.MeshLambertMaterial({ color: 0xff00ff }));
-  }
-  return mesh;
-}
-
-function makePlayerMesh(name, color = 0x6ec79b) {
-  const g = new THREE.Group();
-  const body = new THREE.Mesh(new THREE.BoxGeometry(0.6, 1.0, 0.4), new THREE.MeshLambertMaterial({ color }));
-  body.position.y = 0.7;
-  g.add(body);
-  const head = new THREE.Mesh(new THREE.SphereGeometry(0.28, 10, 8), new THREE.MeshLambertMaterial({ color: 0xd0a888 }));
-  head.position.y = 1.45;
-  g.add(head);
-  // Legs
-  for (let i = 0; i < 2; i++) {
-    const leg = new THREE.Mesh(new THREE.BoxGeometry(0.2, 0.6, 0.2), new THREE.MeshLambertMaterial({ color: 0x2a1a10 }));
-    leg.position.set(i ? 0.12 : -0.12, 0.0, 0);
-    g.add(leg);
-  }
-  // Arms
-  for (let i = 0; i < 2; i++) {
-    const arm = new THREE.Mesh(new THREE.BoxGeometry(0.18, 0.8, 0.18), new THREE.MeshLambertMaterial({ color }));
-    arm.position.set(i ? 0.39 : -0.39, 0.7, 0);
-    g.add(arm);
-  }
-  // Floating name label
-  const label = makeNameSprite(name);
-  label.position.set(0, 2.1, 0);
-  g.add(label);
-  g.userData.label = label;
-  return g;
-}
-
-function makeNameSprite(name) {
-  const canvas = document.createElement("canvas");
-  canvas.width = 256; canvas.height = 64;
-  const ctx = canvas.getContext("2d");
-  ctx.fillStyle = "rgba(0,0,0,0.7)";
-  ctx.fillRect(0, 0, 256, 64);
-  ctx.fillStyle = "#ecdcc8";
-  ctx.font = "bold 30px Georgia";
-  ctx.textAlign = "center";
-  ctx.textBaseline = "middle";
-  ctx.fillText(name, 128, 32);
-  const tex = new THREE.CanvasTexture(canvas);
-  tex.minFilter = THREE.LinearFilter;
-  const mat = new THREE.SpriteMaterial({ map: tex, depthTest: false });
-  const sprite = new THREE.Sprite(mat);
-  sprite.scale.set(2.2, 0.55, 1);
-  sprite.renderOrder = 999;
-  return sprite;
-}
-
-function ensureEntityMesh(id, e) {
-  let mesh = state.entityMeshes[id];
-  if (!mesh) {
-    mesh = makeEntityMesh(e);
-    state.scene.add(mesh);
-    state.entityMeshes[id] = mesh;
-    // Add HP bar for monsters/boss
-    if (e.type === "wolf" || e.type === "skeleton" || e.type === "troll") {
-      const bar = makeHPBar();
-      bar.position.y = 2.4;
-      mesh.add(bar);
-      mesh.userData.hpBar = bar;
+    stripe.position.set(x, h, z);
+    state.trackGroup.add(stripe);
+    // Vertical neon line
+    if (rng() < 0.6) {
+      const line = new THREE.Mesh(
+        new THREE.BoxGeometry(0.18, h * 0.8, 0.18),
+        new THREE.MeshStandardMaterial({ color: hue, emissive: hue, emissiveIntensity: 1.8 })
+      );
+      line.position.set(x + w / 2 - 0.1, h * 0.55, z);
+      state.trackGroup.add(line);
     }
   }
-  return mesh;
 }
 
-function makeHPBar() {
-  const g = new THREE.Group();
-  const bg = new THREE.Mesh(new THREE.PlaneGeometry(1, 0.12), new THREE.MeshBasicMaterial({ color: 0x000000, depthTest: false }));
-  g.add(bg);
-  const fill = new THREE.Mesh(new THREE.PlaneGeometry(1, 0.1), new THREE.MeshBasicMaterial({ color: 0xff6464, depthTest: false }));
-  fill.position.z = 0.001;
-  g.add(fill);
-  g.userData.fill = fill;
-  g.renderOrder = 998;
-  return g;
+function seededRng(seed) {
+  let s = seed >>> 0;
+  return () => {
+    s = (s + 0x6D2B79F5) >>> 0;
+    let t = Math.imul(s ^ (s >>> 15), 1 | s);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
 }
 
-function removeEntityMesh(id) {
-  const mesh = state.entityMeshes[id];
-  if (mesh) {
-    state.scene.remove(mesh);
-    delete state.entityMeshes[id];
-  }
-}
-
-function spawnLootDrop(id, drop) {
-  if (state.lootDrops[id]) return;
-  let mesh;
-  if (drop.type === "hp_potion") {
-    const g = new THREE.Group();
-    const bottle = new THREE.Mesh(
-      new THREE.CylinderGeometry(0.18, 0.22, 0.45, 8),
-      new THREE.MeshStandardMaterial({ color: 0xc45c5c, emissive: 0xc45c5c, emissiveIntensity: 0.7, transparent: true, opacity: 0.9 })
-    );
-    g.add(bottle);
-    const neck = new THREE.Mesh(
-      new THREE.CylinderGeometry(0.07, 0.09, 0.18, 6),
-      new THREE.MeshStandardMaterial({ color: 0x3a2615 })
-    );
-    neck.position.y = 0.3;
-    g.add(neck);
-    const light = new THREE.PointLight(0xff6868, 0.8, 4, 2);
-    light.position.y = 0.5;
-    g.add(light);
-    mesh = g;
-  } else {
-    mesh = new THREE.Mesh(new THREE.SphereGeometry(0.3, 6, 6), new THREE.MeshBasicMaterial({ color: 0xffffff }));
-  }
-  mesh.position.set(drop.x, heightAt(drop.x, drop.z) + 0.45, drop.z);
-  state.scene.add(mesh);
-  state.lootDrops[id] = { ...drop, mesh, id };
-}
-
-function removeLootDrop(id) {
-  const l = state.lootDrops[id];
-  if (l) {
-    state.scene.remove(l.mesh);
-    delete state.lootDrops[id];
-  }
-}
-
-function updateDayNight(dt) {
-  // 0..1 maps to one full cycle. 0=midnight, 0.5=noon, 1=midnight again.
-  // ~6 minute cycle for some atmosphere variety.
-  state.dayT = (state.dayT + dt / 360) % 1;
-  const t = state.dayT;
-  const sunAngle = (t - 0.25) * Math.PI * 2; // 0.25 = sunrise
-  const sx = Math.cos(sunAngle) * 200;
-  const sy = Math.sin(sunAngle) * 200;
-  state.sun.position.set(sx, Math.max(20, sy), 80);
-
-  // Intensity: bright during day, dim at night
-  const dayness = Math.max(0, Math.sin(sunAngle));
-  state.sun.intensity = 0.2 + dayness * 0.9;
-  state.hemiLight.intensity = 0.3 + dayness * 0.5;
-
-  // Tint
-  const dayColor = new THREE.Color(0x88a0c0);
-  const nightColor = new THREE.Color(0x0a0814);
-  const tint = nightColor.clone().lerp(dayColor, dayness);
-  state.scene.background = tint;
-  state.scene.fog.color = tint;
-
-  // Bloom strength rises slightly at night for atmosphere
-  if (state.bloom) state.bloom.strength = 0.85 + (1 - dayness) * 0.6;
-}
-
-// ============================================================
-//  Player movement & combat
-// ============================================================
-function updatePlayer(dt) {
-  if (state.phase !== "playing" || !state.alive) {
-    if (state.phase === "playing" && !state.alive && state.respawnAt && performance.now() > state.respawnAt) {
-      respawnLocal();
-    }
-    return;
-  }
-
-  const obj = state.controls.getObject();
-  const isLocked = state.controls.isLocked;
-
-  // Inputs
-  const fwd = (state.keys["w"] || state.keys["W"] || state.keys["ArrowUp"] ? 1 : 0)
-            - (state.keys["s"] || state.keys["S"] || state.keys["ArrowDown"] ? 1 : 0);
-  const strafe = (state.keys["d"] || state.keys["D"] || state.keys["ArrowRight"] ? 1 : 0)
-              - (state.keys["a"] || state.keys["A"] || state.keys["ArrowLeft"] ? 1 : 0);
-
-  const sprinting = state.keys["Shift"];
-  const speed = sprinting ? SPRINT_SPEED : WALK_SPEED;
-
-  if (isLocked) {
-    if (fwd !== 0) state.controls.moveForward(fwd * speed * dt);
-    if (strafe !== 0) state.controls.moveRight(strafe * speed * dt);
-  }
-
-  // Gravity & jump
-  state.vel.y -= GRAVITY * dt;
-  obj.position.y += state.vel.y * dt;
-
-  const groundY = heightAt(obj.position.x, obj.position.z) + PLAYER_HEIGHT;
-  if (obj.position.y <= groundY) {
-    obj.position.y = groundY;
-    state.vel.y = 0;
-    state.onGround = true;
-  } else {
-    state.onGround = false;
-  }
-
-  if (state.keys[" "] && state.onGround) {
-    state.vel.y = JUMP_VEL;
-    state.onGround = false;
-    sfxJump();
-  }
-
-  // Footstep audio when walking on ground
-  if (state.onGround && (fwd !== 0 || strafe !== 0)) {
-    state.footstepT += dt;
-    const stepInterval = sprinting ? 0.32 : 0.46;
-    if (state.footstepT > stepInterval) {
-      state.footstepT = 0;
-      sfxFootstep();
-    }
-  }
-
-  // Mana regen + cooldown decrement
-  state.mp = Math.min(state.maxMp, state.mp + state.manaRegen * dt);
-  if (state.fireballCd > 0) state.fireballCd -= dt;
-
-  // Constrain to world
-  const lim = WORLD.SIZE - 5;
-  obj.position.x = Math.max(-lim, Math.min(lim, obj.position.x));
-  obj.position.z = Math.max(-lim, Math.min(lim, obj.position.z));
-
-  // Tree/rock collision
-  for (const c of state.treeColliders) {
-    const dx = obj.position.x - c.x;
-    const dz = obj.position.z - c.z;
-    const d2 = dx * dx + dz * dz;
-    const minD = c.r + PLAYER_RADIUS;
-    if (d2 < minD * minD) {
-      const d = Math.sqrt(d2) || 0.0001;
-      obj.position.x = c.x + (dx / d) * minD;
-      obj.position.z = c.z + (dz / d) * minD;
-    }
-  }
-
-  // Sword animation
-  if (state.swingT > 0) {
-    state.swingT = Math.max(0, state.swingT - dt);
-    const t = 1 - state.swingT / 0.35;
-    const a = Math.sin(t * Math.PI);
-    state.sword.rotation.x = -a * 1.6;
-    state.sword.rotation.z = a * 0.3;
-  } else {
-    state.sword.rotation.x = 0;
-    state.sword.rotation.z = 0;
-  }
-
-  if (state.attackCd > 0) state.attackCd -= dt;
-
-  // Pickup check (gold/chest)
-  for (const [id, e] of Object.entries(state.entities)) {
-    if (e.type !== "gold_pile" && e.type !== "chest") continue;
-    const dx = obj.position.x - e.x;
-    const dz = obj.position.z - e.z;
-    if (dx * dx + dz * dz < 1.4 * 1.4) {
-      // Request pickup (host resolves)
-      state.net.send({ type: "pickup", who: state.myId, id });
-      // Optimistic local: temporarily mark as collected to avoid spamming requests
-      e.pending = true;
-      setTimeout(() => { if (state.entities[id]) state.entities[id].pending = false; }, 800);
-    }
-  }
-
-  // Broadcast position at 10 Hz
-  const now = performance.now();
-  if (now - state.lastPosBroadcast > 100) {
-    state.lastPosBroadcast = now;
-    state.net.send({
-      type: "pos",
-      id: state.myId,
-      x: obj.position.x, y: obj.position.y, z: obj.position.z,
-      ry: state.camera.rotation.y, // not quite right but enough for facing
-      swing: state.swingT > 0 ? 1 : 0,
-    });
-  }
-}
-
-function attack() {
-  if (!state.alive || state.attackCd > 0 || state.phase !== "playing") return;
-  if (!state.controls.isLocked) return;
-  state.attackCd = ATTACK_CD;
-  state.swingT = 0.35;
-  sfxSwordSwing();
-
-  // Find nearest enemy in front of player within ATTACK_RANGE
-  const obj = state.controls.getObject();
-  const dir = new THREE.Vector3();
-  state.camera.getWorldDirection(dir);
-  dir.y = 0; dir.normalize();
-
-  let bestId = null, bestDot = -1;
-  for (const [id, e] of Object.entries(state.entities)) {
-    if (e.type !== "wolf" && e.type !== "skeleton" && e.type !== "troll" && e.type !== "dragon") continue;
-    TMP_V.set(e.x - obj.position.x, 0, e.z - obj.position.z);
-    const dist = TMP_V.length();
-    if (dist > ATTACK_RANGE + (e.type === "dragon" ? 2 : 0.6)) continue;
-    TMP_V.normalize();
-    const dot = TMP_V.dot(dir);
-    if (dot < 0.5) continue; // ~60° cone
-    if (dot > bestDot) { bestDot = dot; bestId = id; }
-  }
-  if (bestId) {
-    state.net.send({ type: "attack-entity", who: state.myId, target: bestId, dmg: ATTACK_DMG });
-  }
-}
-
-function castFireball() {
-  if (!state.alive || state.fireballCd > 0 || state.phase !== "playing") return;
-  if (!state.controls.isLocked) return;
-  if (state.mp < 18) {
-    showEvent("Not enough mana", "");
-    return;
-  }
-  state.mp -= 18;
-  state.fireballCd = 0.7;
-  sfxFireball();
-  updateHUD();
-
-  const dir = new THREE.Vector3();
-  state.camera.getWorldDirection(dir);
-  const origin = state.camera.position.clone();
-  origin.addScaledVector(dir, 0.5);
-  spawnFireball(origin, dir.normalize().clone(), state.myId);
-  state.net.send({ type: "fireball", from: state.myId, x: origin.x, y: origin.y, z: origin.z, dx: dir.x, dy: dir.y, dz: dir.z });
-}
-
-function spawnFireball(pos, dir, owner) {
-  const mesh = new THREE.Mesh(
-    new THREE.SphereGeometry(0.32, 8, 8),
-    new THREE.MeshStandardMaterial({
-      color: 0xff8030, emissive: 0xff6020, emissiveIntensity: 2.5, transparent: true, opacity: 0.95,
-    })
-  );
-  mesh.position.copy(pos);
-  state.scene.add(mesh);
-  const light = new THREE.PointLight(0xff8030, 1.2, 8, 2);
-  mesh.add(light);
-  state.fireballs.push({
-    mesh, dir: dir.clone(), life: 2.2, owner, speed: 30,
+// =============================================================
+//  Cars
+// =============================================================
+function positionCarsAtStart() {
+  const data = state.trackData;
+  if (!data) return;
+  const start = data.samples[0];
+  const ids = Object.keys(state.cars);
+  ids.forEach((id, i) => {
+    const car = state.cars[id];
+    // Stagger cars in a 2-column grid behind the start
+    const col = i % 2 === 0 ? -1 : 1;
+    const row = Math.floor(i / 2);
+    const offsetBack = 6 + row * 6;
+    const back = start.tan.clone().multiplyScalar(-offsetBack);
+    const lat = start.right.clone().multiplyScalar(col * 2.8);
+    car.pos.set(start.p.x + back.x + lat.x, 0, start.p.z + back.z + lat.z);
+    car.vel.set(0, 0, 0);
+    car.heading = Math.atan2(start.tan.x, start.tan.z);
+    car.currentCheckpoint = 0;
+    car.lap = 0;
+    car.lapTimes = [];
+    car.bestLap = Infinity;
+    car.raceTime = 0;
+    car.finished = false;
+    car.finishTime = 0;
+    car.lastTrackIndex = 0;
+    car.updateMesh(0.016);
   });
 }
 
-function updateFireballs(dt) {
-  for (let i = state.fireballs.length - 1; i >= 0; i--) {
-    const fb = state.fireballs[i];
-    fb.life -= dt;
-    fb.mesh.position.addScaledVector(fb.dir, fb.speed * dt);
+function spawnCar({ id, name, color, isLocal }) {
+  if (state.cars[id]) return state.cars[id];
+  const car = new Car({ id, name, color, isLocal, scene: state.scene });
+  state.cars[id] = car;
+  return car;
+}
 
-    // Trail
-    state.trailEmit = (state.trailEmit || 0) + dt;
-    if (state.trailEmit > 0.025) {
-      state.trailEmit = 0;
-      spawnTrailParticle(state.scene, fb.mesh.position, { color: 0xff7030, life: 0.4, size: 0.5 });
+function removeCar(id) {
+  const c = state.cars[id];
+  if (!c) return;
+  state.scene.remove(c.mesh);
+  delete state.cars[id];
+}
+
+// =============================================================
+//  Physics integration (local + AI + wall + checkpoint)
+// =============================================================
+function stepCarPhysics(car, dt, isLocal) {
+  if (state.phase === "racing" || state.phase === "finished") {
+    car.step(dt);
+  } else {
+    // Idle — keep wheels still
+    car.vel.set(0, 0, 0);
+  }
+
+  // Track + wall + off-track
+  const data = state.trackData;
+  if (!data) return;
+  const near = nearestOnTrack(data.samples, car.pos.x, car.pos.z, car.lastTrackIndex);
+  car.lastTrackIndex = near.index;
+
+  const halfW = TRACK_WIDTH / 2;
+  const wallEdge = halfW + 0.5;
+  car.onGrass = Math.abs(near.lateral) > halfW;
+
+  // Wall collision: push back, bounce
+  if (Math.abs(near.lateral) > wallEdge) {
+    const sign = near.lateral > 0 ? 1 : -1;
+    const sample = near.sample;
+    const correction = (Math.abs(near.lateral) - wallEdge) * sign;
+    car.pos.x -= sample.right.x * correction;
+    car.pos.z -= sample.right.z * correction;
+
+    // Bounce: reflect lateral velocity component
+    const rt = sample.right;
+    const vLat = car.vel.dot(rt);
+    const vTan = car.vel.dot(new THREE.Vector3(rt.z, 0, -rt.x)); // perpendicular in plane
+    const newLat = -vLat * 0.5;
+    car.vel.set(rt.z * vTan + rt.x * newLat, 0, -rt.x * vTan + rt.z * newLat);
+
+    if (isLocal && car.speed() > 6) {
+      // FX
+      const hitPos = car.pos.clone();
+      hitPos.y = 0.6;
+      spawnSparks(state.scene, hitPos, { count: 18, speed: 9 });
+      sfxCollision(Math.min(1, car.speed() / 30));
+      cameraShake(Math.min(0.7, car.speed() / 40));
     }
+  }
 
-    // Ground collision
-    const gy = heightAt(fb.mesh.position.x, fb.mesh.position.z);
-    let hit = false;
-    if (fb.mesh.position.y < gy + 0.1) hit = true;
+  // Follow track surface elevation
+  const groundY = near.sample.p.y;
+  if (!car.airborne) {
+    // Snap car to road surface
+    car.pos.y = groundY + (car.airborne ? car.yPos : 0);
+  }
 
-    // Entity hit (host authoritative — only host applies damage but everyone shows fx)
-    if (!hit) {
-      for (const [id, e] of Object.entries(state.entities)) {
-        if (e.type !== "wolf" && e.type !== "skeleton" && e.type !== "troll" && e.type !== "dragon") continue;
-        const dx = fb.mesh.position.x - e.x;
-        const dz = fb.mesh.position.z - e.z;
-        const ey = heightAt(e.x, e.z) + 1.2;
-        const dy = fb.mesh.position.y - ey;
-        const r = (e.type === "dragon" ? 3.5 : 1.0);
-        if (dx * dx + dy * dy + dz * dz < r * r) {
-          // Local visual hit
-          spawnParticleBurst(state.scene, fb.mesh.position, { count: 24, color: 0xff6030, speed: 6, life: 0.8 });
-          sfxFireballHit();
-          cameraShake(0.25, 0.25);
-          // Host applies damage
-          if (fb.owner === state.myId) {
-            state.net.send({ type: "attack-entity", who: state.myId, target: id, dmg: 38 });
+  // Jump detection — if we're on a lifted track section, we can leave at the end
+  // (Not fully simulated here; jumps look fine as smooth rise/fall along centerline.)
+
+  // Checkpoint logic
+  if (state.phase === "racing" && !car.finished) {
+    // Determine next checkpoint t
+    const nextCpIdx = car.currentCheckpoint;
+    const nextCp = data.checkpoints[nextCpIdx];
+    // Check whether the car's t has passed the checkpoint t (with wrap awareness)
+    const carT = near.t;
+    let advance = false;
+    if (nextCpIdx === 0) {
+      // Crossing the start/finish line — must be after passing checkpoint N-1
+      // We treat this as: if we previously had checkpoint N-1 and now we crossed t≈0
+      // Detect by carT being very small (< 0.05) while we had been near 1.0 recently
+      if (carT < 0.06 && car.lastT > 0.9) advance = true;
+    } else {
+      // Linear advancement
+      const cpT = nextCp.t;
+      if (carT >= cpT && carT < cpT + 0.2) advance = true;
+    }
+    car.lastT = carT;
+    if (advance) {
+      const finishedCp = car.currentCheckpoint;
+      car.currentCheckpoint = (car.currentCheckpoint + 1) % CHECKPOINT_COUNT;
+      if (finishedCp === 0 && car.lap > 0) {
+        // Already done one lap — record lap time
+        const lt = car.raceTime - car.lapStartT;
+        car.lapStartT = car.raceTime;
+        car.lapTimes.push(lt);
+        if (lt < car.bestLap) car.bestLap = lt;
+      } else if (finishedCp === 0) {
+        // First crossing after start
+        car.lapStartT = car.raceTime;
+      }
+      if (car.currentCheckpoint === 0) {
+        // Just finished a lap — increment lap counter
+        car.lap += 1;
+        if (isLocal) {
+          if (car.lap === state.totalLaps) {
+            car.finished = true;
+            car.finishTime = car.raceTime;
+            onLocalFinished();
+          } else {
+            sfxLap();
+            showCenterMsg(`LAP ${car.lap + 1}`, 1.0);
           }
-          hit = true;
-          break;
         }
       }
     }
-
-    if (hit || fb.life <= 0) {
-      if (hit) {
-        spawnParticleBurst(state.scene, fb.mesh.position, { count: 18, color: 0xffa040, speed: 5, life: 0.6 });
-        sfxFireballHit();
-      }
-      state.scene.remove(fb.mesh);
-      fb.mesh.material.dispose();
-      state.fireballs.splice(i, 1);
-    }
   }
 }
 
-function useHpPotion() {
-  if (state.hpPotions <= 0) return;
-  if (state.hp >= state.maxHp) return;
-  state.hpPotions--;
-  const heal = 40;
-  state.hp = Math.min(state.maxHp, state.hp + heal);
-  sfxPotion();
-  spawnParticleBurst(state.scene, state.camera.position, { count: 14, color: 0x6ec79b, speed: 2.5, life: 0.5, upward: 1.2 });
-  showEvent(`+${heal} HP`, "heal");
-  updateHUD();
-}
+// =============================================================
+//  Camera
+// =============================================================
+const TMP_V3 = new THREE.Vector3();
+const TMP_V3B = new THREE.Vector3();
 
-function respawnLocal() {
-  state.alive = true;
-  state.hp = state.maxHp;
-  state.respawnAt = 0;
-  const obj = state.controls.getObject();
-  obj.position.set(WORLD.SPAWN.x, heightAt(WORLD.SPAWN.x, WORLD.SPAWN.z) + PLAYER_HEIGHT, WORLD.SPAWN.z);
-  state.vel.set(0, 0, 0);
-  state.net.send({ type: "respawn", id: state.myId, x: obj.position.x, y: obj.position.y, z: obj.position.z });
-  updateHUD();
-}
+function updateChaseCamera(dt) {
+  const car = state.myCar || state.previewCar;
+  if (!car) return;
 
-// ============================================================
-//  Host simulation
-// ============================================================
-function hostTick(dt) {
-  if (!state.isHost || state.phase !== "playing") return;
+  const speed = car.vel?.length() ?? 0;
+  const fovBoost = car.boostActive ? 6 : 0;
+  state.camera.fov = 74 + Math.min(speed * 0.12, 6) + fovBoost;
+  state.camera.updateProjectionMatrix();
 
-  // Gather all alive players (self + remote)
-  const players = [];
-  const selfObj = state.controls.getObject();
-  if (state.alive) {
-    players.push({ id: state.myId, x: selfObj.position.x, z: selfObj.position.z });
-  }
-  for (const [id, p] of Object.entries(state.players)) {
-    if (p.alive !== false) players.push({ id, x: p.x ?? 0, z: p.z ?? 0 });
-  }
-  if (players.length === 0) return;
-
-  let changed = false;
-  for (const e of Object.values(state.entities)) {
-    if (e.type !== "wolf" && e.type !== "skeleton" && e.type !== "troll" && e.type !== "dragon") continue;
-
-    // Find nearest player
-    let nearest = null, nearestD2 = Infinity;
-    for (const p of players) {
-      const dx = p.x - e.x, dz = p.z - e.z;
-      const d2 = dx * dx + dz * dz;
-      if (d2 < nearestD2) { nearestD2 = d2; nearest = p; }
-    }
-    if (!nearest) continue;
-    const d = Math.sqrt(nearestD2);
-
-    // Dragon aggro persists once started
-    if (e.type === "dragon") {
-      if (!e.aggro && d < e.sightRange) {
-        e.aggro = true;
-        state.net.send({ type: "boss-aggro" });
-      }
-      if (!e.aggro) continue;
-    } else {
-      if (d > e.sightRange) continue;
-    }
-
-    // Move toward
-    if (d > e.attackRange) {
-      const step = e.speed * dt;
-      const nx = e.x + (nearest.x - e.x) / d * step;
-      const nz = e.z + (nearest.z - e.z) / d * step;
-      e.x = nx;
-      e.z = nz;
-      changed = true;
-    }
-
-    // Attack
-    e.attackCd = (e.attackCd || 0) - dt;
-    if (d <= e.attackRange + 0.2 && e.attackCd <= 0) {
-      e.attackCd = e.type === "dragon" ? 1.8 : (e.type === "troll" ? 2.0 : 1.2);
-      // Damage the nearest player
-      state.net.send({ type: "player-dmg", id: nearest.id, dmg: e.dmg, from: e.id });
-    }
-  }
-
-  // Broadcast entity positions every 250ms
-  const now = performance.now();
-  if (now - state.lastHostTick > 220) {
-    state.lastHostTick = now;
-    const compact = {};
-    for (const [id, e] of Object.entries(state.entities)) {
-      if (e.type === "wolf" || e.type === "skeleton" || e.type === "troll" || e.type === "dragon") {
-        compact[id] = { x: e.x, z: e.z, hp: e.hp };
-      }
-    }
-    state.net.send({ type: "entities-pos", data: compact });
+  if (state.cameraMode === 0) {
+    // Chase camera — behind & above
+    const back = new THREE.Vector3(Math.sin(car.heading), 0, Math.cos(car.heading));
+    const camOffset = back.clone().multiplyScalar(-9);
+    const target = new THREE.Vector3(car.pos.x + camOffset.x, car.pos.y + 4.0, car.pos.z + camOffset.z);
+    state.camera.position.lerp(target, Math.min(1, dt * 6));
+    state.camera.lookAt(car.pos.x, car.pos.y + 1.2, car.pos.z);
+  } else if (state.cameraMode === 1) {
+    // Cockpit
+    const fwd = new THREE.Vector3(Math.sin(car.heading), 0, Math.cos(car.heading));
+    state.camera.position.set(car.pos.x, car.pos.y + 1.45, car.pos.z);
+    const look = new THREE.Vector3(car.pos.x + fwd.x * 5, car.pos.y + 1.45, car.pos.z + fwd.z * 5);
+    state.camera.lookAt(look);
+  } else {
+    // Top-down
+    state.camera.position.set(car.pos.x, car.pos.y + 22, car.pos.z + 0.001);
+    state.camera.lookAt(car.pos.x, car.pos.y, car.pos.z);
   }
 }
 
-// ============================================================
-//  Network message handler
-// ============================================================
+// =============================================================
+//  Networking
+// =============================================================
 function onMessage(msg) {
   if (!msg) return;
-
   switch (msg.type) {
     case "hello": {
-      // A peer announced themselves
-      if (!state.players[msg.id] && msg.id !== state.myId) {
-        const p = {
-          name: msg.name || "Wanderer",
-          x: WORLD.SPAWN.x, y: 0, z: WORLD.SPAWN.z,
-          tx: WORLD.SPAWN.x, ty: 0, tz: WORLD.SPAWN.z,
-          hp: 100, maxHp: 100, gold: 0, alive: true,
-          mesh: null,
-          lastUpdate: performance.now(),
-        };
-        const colors = [0x6ec79b, 0xd97455, 0x9b7ed4, 0xd4a259];
-        const colorIdx = Object.keys(state.players).length % colors.length;
-        p.mesh = makePlayerMesh(p.name, colors[colorIdx]);
-        state.scene.add(p.mesh);
-        state.players[msg.id] = p;
-        updatePlayerList();
+      if (msg.id === state.myId) break;
+      if (!state.cars[msg.id]) {
+        const car = spawnCar({ id: msg.id, name: msg.name || "Driver", color: msg.color ?? COLORS[1], isLocal: false });
+        car.alive = true;
+      } else {
+        state.cars[msg.id].name = msg.name;
       }
-      // If host, send full state snapshot to this peer
-      if (state.isHost && msg.id !== state.myId) {
+      updateLobby();
+      // Host sends snapshot back
+      if (state.isHost) {
+        const peerInfo = {};
+        for (const [id, c] of Object.entries(state.cars)) {
+          if (id === state.myId) peerInfo[id] = { name: state.myName, color: state.myColor };
+          else peerInfo[id] = { name: c.name, color: c.color };
+        }
         state.net.send({
           type: "snapshot", to: msg.id,
-          seed: state.worldSeed,
-          entities: state.entities,
-          players: dumpPlayersForSnapshot(),
-          phase: state.phase,
+          trackId: state.trackId, phase: state.phase,
+          drivers: peerInfo,
         });
       }
       break;
     }
     case "snapshot": {
-      if (msg.to !== state.myId) return;
-      if (msg.seed !== undefined && state.worldSeed !== msg.seed) {
-        state.worldSeed = msg.seed;
-        buildPropsForSeed(msg.seed);
+      if (msg.to !== state.myId) break;
+      if (msg.trackId && msg.trackId !== state.trackId) {
+        buildTrack(msg.trackId);
       }
-      state.entities = msg.entities || {};
-      // Rebuild meshes for all entities
-      for (const id of Object.keys(state.entityMeshes)) removeEntityMesh(id);
-      for (const [id, e] of Object.entries(state.entities)) {
-        const mesh = ensureEntityMesh(id, e);
-        mesh.position.set(e.x, heightAt(e.x, e.z), e.z);
-      }
-      // Apply player records
-      for (const [pid, pdata] of Object.entries(msg.players || {})) {
-        if (pid === state.myId) continue;
-        if (!state.players[pid]) {
-          const colors = [0x6ec79b, 0xd97455, 0x9b7ed4, 0xd4a259];
-          const colorIdx = Object.keys(state.players).length % colors.length;
-          const m = makePlayerMesh(pdata.name || "Wanderer", colors[colorIdx]);
-          state.scene.add(m);
-          state.players[pid] = {
-            ...pdata, mesh: m,
-            tx: pdata.x, ty: pdata.y, tz: pdata.z,
-            lastUpdate: performance.now(),
-          };
+      // Add any drivers we don't know
+      for (const [id, info] of Object.entries(msg.drivers || {})) {
+        if (id === state.myId) continue;
+        if (!state.cars[id]) {
+          spawnCar({ id, name: info.name, color: info.color, isLocal: false });
         }
       }
-      if (msg.phase === "playing" && state.phase !== "playing") {
-        enterGame();
+      // If race already started, drop into countdown/racing
+      if (msg.phase === "countdown" || msg.phase === "racing") {
+        ensureLocalCar();
+        positionCarsAtStart();
+        $("#screen-lobby").classList.add("hidden");
+        $("#hud").classList.remove("hidden");
+        state.phase = msg.phase;
       }
-      updatePlayerList();
+      updateLobby();
+      break;
+    }
+    case "start-countdown": {
+      if (msg.trackId !== state.trackId) buildTrack(msg.trackId);
+      $("#screen-lobby").classList.add("hidden");
+      $("#hud").classList.remove("hidden");
+      ensureLocalCar();
+      positionCarsAtStart();
+      beginCountdown();
       break;
     }
     case "pos": {
-      if (msg.id === state.myId) return;
-      const p = state.players[msg.id];
-      if (!p) return;
-      p.tx = msg.x; p.ty = msg.y; p.tz = msg.z;
-      p.lastUpdate = performance.now();
-      if (msg.swing && p.mesh) {
-        // Animate the arm? For simplicity, briefly tint the mesh
-        p.mesh.userData.swingT = 0.3;
-      }
-      if (msg.ry !== undefined && p.mesh) p.mesh.rotation.y = msg.ry;
+      if (msg.id === state.myId) break;
+      const car = state.cars[msg.id];
+      if (!car) break;
+      car.tx = msg.x; car.ty = msg.y; car.tz = msg.z;
+      car.tHeading = msg.h;
+      car.boostActive = !!msg.b;
+      car.drifting = !!msg.d;
+      car.lap = msg.lap ?? car.lap;
+      car.currentCheckpoint = msg.cp ?? car.currentCheckpoint;
+      car.raceTime = msg.t ?? car.raceTime;
+      car.lastNetUpdate = performance.now();
       break;
     }
-    case "start": {
-      if (msg.seed !== undefined && state.worldSeed !== msg.seed) {
-        state.worldSeed = msg.seed;
-        buildPropsForSeed(msg.seed);
-      }
-      state.entities = msg.entities || {};
-      for (const id of Object.keys(state.entityMeshes)) removeEntityMesh(id);
-      for (const [id, e] of Object.entries(state.entities)) {
-        const mesh = ensureEntityMesh(id, e);
-        mesh.position.set(e.x, heightAt(e.x, e.z), e.z);
-      }
-      enterGame();
-      break;
-    }
-    case "entities-pos": {
-      if (state.isHost) return; // host is authoritative
-      for (const [id, e] of Object.entries(msg.data || {})) {
-        if (!state.entities[id]) continue;
-        Object.assign(state.entities[id], e);
+    case "finished": {
+      const car = state.cars[msg.id];
+      if (car) {
+        car.finished = true;
+        car.finishTime = msg.time;
       }
       break;
     }
-    case "attack-entity": {
-      if (!state.isHost) return;
-      const e = state.entities[msg.target];
-      if (!e) return;
-      e.hp = (e.hp || 0) - (msg.dmg || 0);
-      // Tell all clients to show damage number + hit particles at this entity
-      state.net.send({ type: "entity-hurt", id: msg.target, dmg: msg.dmg, x: e.x, z: e.z });
-      if (e.hp <= 0) {
-        // Loot drop chance (host rolls)
-        let drop = null;
-        if (Math.random() < 0.35 && e.type !== "dragon") {
-          drop = { type: "hp_potion", x: e.x, z: e.z };
-        }
-        const goldAward = e.gold || 0;
-        state.net.send({ type: "kill-entity", id: e.id || msg.target, by: msg.who, gold: goldAward, kind: e.type, x: e.x, z: e.z, drop });
-        delete state.entities[msg.target];
-        if (e.type === "dragon") {
-          state.net.send({ type: "victory", by: msg.who });
-          state.phase = "won";
-        }
-      } else {
-        state.net.send({ type: "entity-hp", id: msg.target, hp: e.hp });
-      }
+    case "leave": {
+      removeCar(msg.id);
+      updateLobby();
       break;
     }
-    case "entity-hurt": {
-      // All clients show feedback
-      const yWorld = heightAt(msg.x, msg.z) + 1.6;
-      const pos = new THREE.Vector3(msg.x, yWorld, msg.z);
-      spawnDamageNumber(state.scene, pos, "-" + msg.dmg, { color: "#ffe080" });
-      spawnParticleBurst(state.scene, pos, { count: 10, color: 0xff5050, speed: 4, life: 0.4 });
-      sfxHit();
-      break;
-    }
-    case "kill-entity": {
-      // All clients: death poof, sound, remove mesh
-      const yWorld = heightAt(msg.x ?? 0, msg.z ?? 0) + 0.6;
-      const pos = new THREE.Vector3(msg.x ?? 0, yWorld, msg.z ?? 0);
-      spawnParticleBurst(state.scene, pos, {
-        count: 26,
-        color: msg.kind === "dragon" ? 0xff4030 : 0x603020,
-        emissive: msg.kind === "dragon" ? 0xff6040 : 0x301810,
-        speed: 6, life: 0.9, upward: 1.2,
-      });
-      sfxEnemyDeath();
-      if (msg.kind === "dragon") {
-        cameraShake(0.9, 0.8);
-        spawnParticleBurst(state.scene, pos, { count: 80, color: 0xff7050, speed: 10, life: 1.4, upward: 1.4 });
-        sfxVictory();
-      }
-      removeEntityMesh(msg.id);
-      delete state.entities[msg.id];
-      if (msg.kind === "dragon") {
-        showEvent("The Pale Dragon falls!", "kill");
-      } else {
-        showEvent(`${msg.kind} slain`, "kill");
-      }
-      if (msg.by === state.myId) {
-        state.gold += msg.gold || 0;
-        updateHUD();
-        showEvent(`+${msg.gold || 0} gold`, "gold");
-      } else if (state.players[msg.by]) {
-        state.players[msg.by].gold = (state.players[msg.by].gold || 0) + (msg.gold || 0);
-        updatePlayerList();
-      }
-      // Spawn loot drop (mesh visible to all)
-      if (msg.drop) {
-        const dropId = "drop_" + msg.id;
-        spawnLootDrop(dropId, msg.drop);
-      }
-      break;
-    }
-    case "entity-hp": {
-      const e = state.entities[msg.id];
-      if (e) e.hp = msg.hp;
-      break;
-    }
-    case "pickup": {
-      if (!state.isHost) return;
-      const e = state.entities[msg.id];
-      if (!e || (e.type !== "gold_pile" && e.type !== "chest")) return;
-      const val = e.value || 0;
-      state.net.send({ type: "picked-up", id: msg.id, by: msg.who, value: val });
-      delete state.entities[msg.id];
-      break;
-    }
-    case "picked-up": {
-      // Sparkle + sound
-      const e = state.entities[msg.id];
-      if (e) {
-        const pos = new THREE.Vector3(e.x, heightAt(e.x, e.z) + 0.6, e.z);
-        spawnParticleBurst(state.scene, pos, { count: 14, color: 0xf5c97a, speed: 3, life: 0.7, upward: 1.6 });
-      }
-      sfxPickup();
-      removeEntityMesh(msg.id);
-      delete state.entities[msg.id];
-      if (msg.by === state.myId) {
-        state.gold += msg.value || 0;
-        updateHUD();
-        showEvent(`+${msg.value} gold`, "gold");
-      } else if (state.players[msg.by]) {
-        state.players[msg.by].gold = (state.players[msg.by].gold || 0) + (msg.value || 0);
-        updatePlayerList();
-      }
-      break;
-    }
-    case "fireball": {
-      // Other players' fireballs — render visual only (host handles damage)
-      if (msg.from === state.myId) return;
-      const pos = new THREE.Vector3(msg.x, msg.y, msg.z);
-      const dir = new THREE.Vector3(msg.dx, msg.dy, msg.dz);
-      spawnFireball(pos, dir, msg.from);
-      break;
-    }
-    case "loot-pickup": {
-      // Local player picked up potion
-      if (msg.by === state.myId) {
-        if (msg.kind === "hp_potion") {
-          state.hpPotions = Math.min(5, state.hpPotions + 1);
-          showEvent("HP Potion picked up", "heal");
-          sfxPickup();
-        }
-        updateHUD();
-      }
-      removeLootDrop(msg.id);
-      break;
-    }
-    case "player-dmg": {
-      // Apply to local player or remote
-      if (msg.id === state.myId) {
-        state.hp = Math.max(0, state.hp - msg.dmg);
-        state.lastHurtAt = performance.now();
-        flashHurt();
-        sfxPlayerHurt();
-        cameraShake(0.5, 0.35);
-        if (state.hp <= 0) {
-          state.alive = false;
-          state.respawnAt = performance.now() + 4000;
-          showEvent("You fell. Respawning…", "kill");
-          state.net.send({ type: "player-died", id: state.myId });
-          spawnParticleBurst(state.scene, state.camera.position, { count: 40, color: 0xc45c5c, speed: 5, life: 1.0, upward: 1.5 });
-        }
-        updateHUD();
-      } else if (state.players[msg.id]) {
-        const p = state.players[msg.id];
-        p.hp = Math.max(0, (p.hp || p.maxHp || 100) - msg.dmg);
-        if (p.hp <= 0) { p.alive = false; if (p.mesh) p.mesh.visible = false; }
-        updatePlayerList();
-      }
-      break;
-    }
-    case "player-died": {
-      if (state.players[msg.id]) {
-        state.players[msg.id].alive = false;
-        if (state.players[msg.id].mesh) state.players[msg.id].mesh.visible = false;
-      }
-      break;
-    }
-    case "respawn": {
-      if (msg.id === state.myId) return;
-      const p = state.players[msg.id];
-      if (!p) return;
-      p.alive = true;
-      p.hp = p.maxHp || 100;
-      p.tx = msg.x; p.ty = msg.y; p.tz = msg.z;
-      if (p.mesh) p.mesh.visible = true;
-      updatePlayerList();
-      break;
-    }
-    case "boss-aggro": {
-      state.bossAggro = true;
-      $("#boss-bar").classList.remove("hidden");
-      showEvent("The Pale Dragon stirs.", "kill");
-      sfxDragonRoar();
-      cameraShake(0.6, 0.8);
-      break;
-    }
-    case "victory": {
-      state.phase = "won";
-      showEndScreen(true);
-      break;
-    }
-    case "hello-back":
-      // No-op — used by some hello patterns
-      break;
   }
 }
 
-function dumpPlayersForSnapshot() {
-  const out = {};
-  const self = state.controls.getObject();
-  out[state.myId] = { name: state.myName, x: self.position.x, y: self.position.y, z: self.position.z, hp: state.hp, maxHp: state.maxHp, gold: state.gold, alive: state.alive };
-  for (const [id, p] of Object.entries(state.players)) {
-    out[id] = { name: p.name, x: p.tx, y: p.ty, z: p.tz, hp: p.hp, maxHp: p.maxHp, gold: p.gold, alive: p.alive };
-  }
-  return out;
-}
-
-// ============================================================
-//  HUD
-// ============================================================
-function updateHUD() {
-  const pct = (state.hp / state.maxHp) * 100;
-  $("#hp-fill").style.width = pct + "%";
-  $("#hp-num").textContent = `${Math.max(0, Math.floor(state.hp))}/${state.maxHp}`;
-  const mpPct = (state.mp / state.maxMp) * 100;
-  $("#mp-fill").style.width = mpPct + "%";
-  $("#mp-num").textContent = `${Math.max(0, Math.floor(state.mp))}/${state.maxMp}`;
-  $("#gold-num").textContent = state.gold;
-  $("#potion-count").textContent = state.hpPotions;
-
-  // Boss bar
-  const boss = state.entities["boss"];
-  if (boss && state.bossAggro) {
-    $("#boss-bar").classList.remove("hidden");
-    $("#boss-hp-fill").style.width = ((boss.hp / boss.maxHp) * 100) + "%";
-  } else if (!boss && state.bossAggro) {
-    $("#boss-bar").classList.add("hidden");
-  }
-
-  // Objective distance
-  if (boss) {
-    const obj = state.controls.getObject();
-    const dx = boss.x - obj.position.x, dz = boss.z - obj.position.z;
-    const d = Math.sqrt(dx * dx + dz * dz);
-    $("#obj-distance").textContent = `${d.toFixed(0)}m`;
+function ensureLocalCar() {
+  if (!state.cars[state.myId]) {
+    state.myCar = spawnCar({ id: state.myId, name: state.myName, color: state.myColor, isLocal: true });
+    state.myCar.mesh.userData.label.visible = false; // hide your own label
   } else {
-    $("#obj-distance").textContent = "— —";
+    state.myCar = state.cars[state.myId];
   }
 }
 
-function updatePlayerList() {
-  const list = $("#player-list");
-  list.innerHTML = "";
-  for (const [id, p] of Object.entries(state.players)) {
-    const tag = document.createElement("div");
-    tag.className = "player-tag" + (p.alive === false ? " dead" : "");
-    tag.innerHTML = `
-      <div class="ptag-name">${escapeHTML(p.name || "Wanderer")}</div>
-      <div class="ptag-hp">${Math.max(0, Math.floor(p.hp || 0))}/${p.maxHp || 100}  ·  ★ ${p.gold || 0}</div>
-    `;
-    list.appendChild(tag);
-  }
+// =============================================================
+//  Race lifecycle
+// =============================================================
+function beginCountdown() {
+  state.phase = "countdown";
+  state.countdownT = 0;
+  state.countdownStep = -1;
+}
 
-  // Lobby roster — show self + all known players
-  const lobby = $("#lobby-players");
-  if (lobby) {
-    lobby.innerHTML = "";
-    const roster = [
-      { id: state.myId, name: state.myName + (state.isHost ? " (host)" : ""), self: true },
-      ...Object.entries(state.players).map(([id, p]) => ({ id, name: p.name || "Wanderer" })),
-    ];
-    for (const r of roster) {
-      const row = document.createElement("div");
-      row.className = "player-row";
-      row.innerHTML = `<span class="name">${escapeHTML(r.name)}</span>`;
-      lobby.appendChild(row);
+function tickCountdown(dt) {
+  if (state.phase !== "countdown") return;
+  state.countdownT += dt;
+  const step = Math.floor(state.countdownT);
+  if (step !== state.countdownStep) {
+    state.countdownStep = step;
+    if (step === 0) { showCenterMsg("3", 0.9); sfxCountdownBeep(false); }
+    else if (step === 1) { showCenterMsg("2", 0.9); sfxCountdownBeep(false); }
+    else if (step === 2) { showCenterMsg("1", 0.9); sfxCountdownBeep(false); }
+    else if (step === 3) {
+      showCenterMsg("GO!", 0.9);
+      sfxCountdownBeep(true);
+      state.phase = "racing";
+      state.raceStartT = performance.now() / 1000;
+      // Reset per-car race time
+      for (const c of Object.values(state.cars)) {
+        c.raceTime = 0;
+        c.lapStartT = 0;
+      }
     }
   }
 }
 
-function flashHurt() {
-  document.body.style.transition = "background 0.18s";
-  document.body.style.background = "rgba(196,92,92,0.4)";
-  setTimeout(() => { document.body.style.background = ""; }, 180);
+function onLocalFinished() {
+  sfxFinish();
+  showCenterMsg("FINISH", 2.0);
+  state.net.send({ type: "finished", id: state.myId, time: state.myCar.finishTime });
+  setTimeout(showFinishScreen, 1800);
 }
 
-function showEvent(text, kind = "") {
-  const el = document.createElement("div");
-  el.className = "event " + kind;
-  el.textContent = text;
-  $("#event-log").appendChild(el);
-  setTimeout(() => el.classList.add("fade"), 2000);
-  setTimeout(() => el.remove(), 3200);
-}
-
-function showEndScreen(victory) {
-  state.finished = true;
-  state.controls.unlock();
+function showFinishScreen() {
+  state.phase = "finished";
   $("#hud").classList.add("hidden");
-  $("#screen-end").classList.remove("hidden");
-  $("#end-title").textContent = victory ? "The Pale Dragon Falls" : "The Vale Defeats You";
-  const stats = $("#end-stats");
-  stats.innerHTML = "";
-  const allPlayers = [
-    { name: state.myName + " (you)", gold: state.gold, hp: state.hp, maxHp: state.maxHp },
-    ...Object.values(state.players).map(p => ({ name: p.name, gold: p.gold || 0, hp: p.hp || 0, maxHp: p.maxHp || 100 })),
-  ];
-  for (const p of allPlayers) {
+  $("#screen-finish").classList.remove("hidden");
+  // Build results list (only those finished, then those not finished by progress)
+  const all = Object.values(state.cars);
+  const finishedCars = all.filter(c => c.finished).sort((a, b) => a.finishTime - b.finishTime);
+  const unfinished = all.filter(c => !c.finished)
+    .sort((a, b) => raceProgress(b) - raceProgress(a));
+  const results = [...finishedCars, ...unfinished];
+
+  $("#finish-title").textContent = state.myCar && results[0] && results[0].id === state.myId
+    ? "Victory"
+    : "Race complete";
+
+  const root = $("#finish-results");
+  root.innerHTML = "";
+  results.forEach((c, i) => {
     const row = document.createElement("div");
     row.className = "end-stat-row";
-    row.innerHTML = `<span>${escapeHTML(p.name)}</span><span>★ ${p.gold}</span>`;
-    stats.appendChild(row);
+    row.style.color = "#" + new THREE.Color(c.color).getHexString();
+    const time = c.finished ? formatTime(c.finishTime) : `Lap ${c.lap + 1}`;
+    row.innerHTML = `
+      <span class="pos">P${i + 1}</span>
+      <span class="nm">${escapeHTML(c.name)}${c.isLocal ? " (you)" : ""}</span>
+      <span class="tm">${time}</span>
+    `;
+    root.appendChild(row);
+  });
+}
+
+function raceProgress(car) {
+  return (car.lap || 0) + ((car.currentCheckpoint || 0) / CHECKPOINT_COUNT);
+}
+
+// =============================================================
+//  HUD
+// =============================================================
+function updateHUD() {
+  if (state.phase !== "racing" && state.phase !== "countdown" && state.phase !== "finished") return;
+  const car = state.myCar;
+  if (!car) return;
+
+  // Speed
+  const kmh = Math.round(car.speed() * 3.6);
+  $("#speed-num").textContent = kmh;
+
+  // Boost bar
+  $("#boost-fill").style.width = (car.boost * 100) + "%";
+  $("#boost-fill").classList.toggle("full", car.boost >= 0.99);
+
+  // Lap / pos
+  $("#lap-num").textContent = `${Math.min(state.totalLaps, car.lap + 1)}/${state.totalLaps}`;
+
+  // Position — sort cars by progress
+  const cars = Object.values(state.cars);
+  cars.sort((a, b) => {
+    if (a.finished && !b.finished) return -1;
+    if (!a.finished && b.finished) return 1;
+    if (a.finished && b.finished) return a.finishTime - b.finishTime;
+    return raceProgress(b) - raceProgress(a);
+  });
+  const myIdx = cars.findIndex(c => c.id === state.myId);
+  $("#pos-num").textContent = `${Math.max(1, myIdx + 1)}/${cars.length}`;
+
+  // Time
+  $("#race-time").textContent = formatTime(car.raceTime);
+  $("#best-lap").textContent = car.bestLap < Infinity ? formatTime(car.bestLap) : "—";
+
+  // Standings list
+  const stRoot = $("#standings");
+  stRoot.innerHTML = "";
+  cars.forEach((c, i) => {
+    const row = document.createElement("div");
+    row.className = "standing-row" + (c.id === state.myId ? " me" : "");
+    row.style.color = "#" + new THREE.Color(c.color).getHexString();
+    const gap = c.finished
+      ? formatTime(c.finishTime)
+      : i === 0
+        ? "—"
+        : "+" + Math.max(0, (raceProgress(cars[0]) - raceProgress(c))).toFixed(2);
+    row.innerHTML = `
+      <span class="pos">P${i + 1}</span>
+      <span class="nm">${escapeHTML(c.name)}</span>
+      <span class="gap">${gap}</span>
+    `;
+    stRoot.appendChild(row);
+  });
+
+  // Minimap
+  drawMinimap();
+}
+
+function drawMinimap() {
+  const ctx = state.minimapCtx;
+  if (!ctx) return;
+  const W = 180, H = 180;
+  ctx.clearRect(0, 0, W, H);
+  const data = state.trackData;
+  if (!data) return;
+  // Find bounds of track
+  let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
+  for (let i = 0; i < data.samples.length; i += 4) {
+    const p = data.samples[i].p;
+    if (p.x < minX) minX = p.x;
+    if (p.x > maxX) maxX = p.x;
+    if (p.z < minZ) minZ = p.z;
+    if (p.z > maxZ) maxZ = p.z;
   }
+  const pad = 14;
+  const sx = (W - pad * 2) / (maxX - minX || 1);
+  const sz = (H - pad * 2) / (maxZ - minZ || 1);
+  const s = Math.min(sx, sz);
+  const off = (v, min, range, totalRange) => pad + (v - min) * s + (range - totalRange) / 2;
+  const projX = (x) => pad + (x - minX) * s + (W - pad * 2 - (maxX - minX) * s) / 2;
+  const projZ = (z) => pad + (z - minZ) * s + (H - pad * 2 - (maxZ - minZ) * s) / 2;
+
+  // Track outline
+  ctx.strokeStyle = "rgba(255, 255, 255, 0.85)";
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  for (let i = 0; i < data.samples.length; i += 4) {
+    const p = data.samples[i].p;
+    const x = projX(p.x), y = projZ(p.z);
+    if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+  }
+  ctx.closePath();
+  ctx.stroke();
+
+  // Start line dot
+  const start = data.samples[0].p;
+  ctx.fillStyle = "#ff8030";
+  ctx.beginPath();
+  ctx.arc(projX(start.x), projZ(start.z), 3, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Cars
+  for (const c of Object.values(state.cars)) {
+    ctx.fillStyle = "#" + new THREE.Color(c.color).getHexString();
+    ctx.beginPath();
+    ctx.arc(projX(c.pos.x), projZ(c.pos.z), c.id === state.myId ? 5 : 3.5, 0, Math.PI * 2);
+    ctx.fill();
+  }
+}
+
+function formatTime(t) {
+  if (!isFinite(t)) return "—";
+  const m = Math.floor(t / 60);
+  const s = t - m * 60;
+  return `${m}:${s.toFixed(2).padStart(5, "0")}`;
 }
 
 function escapeHTML(s) {
   return String(s).replace(/[&<>"']/g, c => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[c]));
+}
+
+function showCenterMsg(text, dur = 1.5) {
+  const el = $("#centermsg");
+  el.textContent = text;
+  el.classList.remove("hidden");
+  clearTimeout(showCenterMsg._t);
+  showCenterMsg._t = setTimeout(() => el.classList.add("hidden"), dur * 1000);
 }
 
 function banner(msg, kind = "error") {
@@ -1394,290 +877,391 @@ function banner(msg, kind = "error") {
   b.className = kind === "info" ? "info" : "";
   b.classList.remove("hidden");
   clearTimeout(banner._t);
-  banner._t = setTimeout(() => b.classList.add("hidden"), 3500);
+  banner._t = setTimeout(() => b.classList.add("hidden"), 3000);
 }
 
-// ============================================================
-//  Boot / mode selection
-// ============================================================
+// =============================================================
+//  Input
+// =============================================================
+function setupInput() {
+  document.addEventListener("keydown", (e) => {
+    state.keys[e.key] = true;
+    unlockAudio();
+    if (state.phase === "racing" || state.phase === "countdown") {
+      if (e.key === " ") {
+        // Boost
+        if (state.myCar && state.myCar.boost > 0 && !state.myCar.boostActive) {
+          state.myCar.boostActive = true;
+          sfxBoost();
+        }
+      }
+      if (e.key === "r" || e.key === "R") {
+        respawnAtLastCheckpoint();
+      }
+      if (e.key === "c" || e.key === "C") {
+        state.cameraMode = (state.cameraMode + 1) % 3;
+      }
+    }
+  });
+  document.addEventListener("keyup", (e) => {
+    state.keys[e.key] = false;
+    if (e.key === " ") {
+      // Release boost = stop active (but keep meter)
+      if (state.myCar) state.myCar.boostActive = false;
+    }
+  });
+  document.addEventListener("click", () => unlockAudio());
+}
+
+function respawnAtLastCheckpoint() {
+  if (!state.myCar || !state.trackData) return;
+  const car = state.myCar;
+  const cp = state.trackData.checkpoints[Math.max(0, car.currentCheckpoint - 1)] || state.trackData.checkpoints[0];
+  car.pos.set(cp.pos.x, 0, cp.pos.z);
+  car.vel.set(0, 0, 0);
+  car.heading = Math.atan2(cp.forward.x, cp.forward.z);
+  showCenterMsg("RESPAWN", 0.6);
+}
+
+// =============================================================
+//  Title / track-pick / lobby flow
+// =============================================================
+function renderColorPicker() {
+  const root = $("#color-pick");
+  root.innerHTML = "";
+  COLORS.forEach((col, i) => {
+    const sw = document.createElement("div");
+    sw.className = "color-swatch" + (col === state.myColor ? " selected" : "");
+    sw.style.background = "#" + new THREE.Color(col).getHexString();
+    sw.style.color = "#" + new THREE.Color(col).getHexString();
+    sw.addEventListener("click", () => {
+      state.myColor = col;
+      renderColorPicker();
+      // Update preview car
+      if (state.previewCar) {
+        state.previewCar.mesh.children.forEach(ch => {
+          if (ch.material && ch.material.color && ch.material.color.getHex() !== 0x101010
+              && !ch.material.emissive) {
+            // tint chassis-ish parts
+          }
+        });
+      }
+    });
+    root.appendChild(sw);
+  });
+}
+
+function renderTrackPick() {
+  const root = $("#track-pick");
+  root.innerHTML = "";
+  Object.values(TRACKS).forEach(t => {
+    const card = document.createElement("div");
+    card.className = "track-card" + (t.id === state.trackId ? " selected" : "");
+    card.innerHTML = `
+      <div class="track-name">${escapeHTML(t.name)}</div>
+      <div class="track-blurb">${escapeHTML(t.blurb)}</div>
+      <div class="track-stats">${t.laps} LAPS</div>
+    `;
+    card.addEventListener("click", () => {
+      state.trackId = t.id;
+      renderTrackPick();
+    });
+    root.appendChild(card);
+  });
+}
+
+function updateLobby() {
+  const root = $("#lobby-drivers");
+  if (!root) return;
+  root.innerHTML = "";
+  const all = [];
+  if (state.myId) all.push({ id: state.myId, name: state.myName + (state.isHost ? " (host)" : ""), color: state.myColor, isLocal: true });
+  for (const [id, c] of Object.entries(state.cars)) {
+    if (id === state.myId) continue;
+    all.push({ id, name: c.name, color: c.color, isLocal: false });
+  }
+  all.forEach(d => {
+    const row = document.createElement("div");
+    row.className = "driver-row";
+    row.style.color = "#" + new THREE.Color(d.color).getHexString();
+    row.innerHTML = `
+      <div class="swatch-mini"></div>
+      <span class="name">${escapeHTML(d.name)}</span>
+      ${d.isLocal ? '<span class="tag">YOU</span>' : ''}
+    `;
+    root.appendChild(row);
+  });
+  $("#lobby-track").textContent = TRACKS[state.trackId].name;
+}
+
+// =============================================================
+//  Mode handlers
+// =============================================================
 async function startSolo() {
-  const name = $("#name").value.trim();
-  if (!name) return banner("Enter your name first.");
-  state.myName = name;
+  state.solo = true;
+  state.isHost = true;
   state.net.initSolo();
   state.net.onMessage = onMessage;
-  state.isHost = true;
   state.myId = state.net.myId;
-  state.worldSeed = Math.floor(Math.random() * 0x7fffffff);
-  buildPropsForSeed(state.worldSeed);
-  state.entities = placeEntities(state.worldSeed);
-  // Halve boss HP for solo
-  if (state.entities["boss"]) {
-    state.entities["boss"].hp = 110;
-    state.entities["boss"].maxHp = 110;
+  state.myName = $("#name").value.trim() || "Driver";
+
+  // Build chosen track and add player + AI cars
+  buildTrack(state.trackId);
+  ensureLocalCar();
+
+  // Two AI opponents
+  const aiNames = ["Embra", "Korr"];
+  const aiSkills = [0.95, 0.88];
+  for (let i = 0; i < 2; i++) {
+    const id = "ai_" + i;
+    const color = COLORS[(i + 1) % COLORS.length];
+    const car = spawnCar({ id, name: aiNames[i], color, isLocal: false });
+    state.aiDrivers.push(new AIDriver(car, state.trackData.samples, aiSkills[i]));
   }
-  for (const [id, e] of Object.entries(state.entities)) {
-    const m = ensureEntityMesh(id, e);
-    m.position.set(e.x, heightAt(e.x, e.z), e.z);
-  }
-  $("#screen-start").classList.add("hidden");
-  enterGame();
+
+  positionCarsAtStart();
+
+  // Hide title, show HUD, begin countdown
+  $("#screen-track").classList.add("hidden");
+  $("#hud").classList.remove("hidden");
+  beginCountdown();
 }
 
-async function hostCoop() {
-  const name = $("#name").value.trim();
-  if (!name) return banner("Enter your name first.");
-  state.myName = name;
-  state.roomCode = makeRoomCode();
+async function startHost() {
+  state.solo = false;
+  state.isHost = true;
   state.net.onMessage = onMessage;
   state.net.onPresenceChange = (present) => {
-    for (const id of Object.keys(state.players)) {
-      if (!present.has(id)) {
-        if (state.players[id].mesh) state.scene.remove(state.players[id].mesh);
-        delete state.players[id];
-        updatePlayerList();
+    for (const id of Object.keys(state.cars)) {
+      if (id !== state.myId && !present.has(id)) {
+        removeCar(id);
+        updateLobby();
       }
     }
   };
+  state.roomCode = makeRoomCode();
+  state.myName = $("#name").value.trim() || "Driver";
+
   try {
     await state.net.joinRoom(state.roomCode);
   } catch (e) {
-    return banner("Could not start room: " + e.message);
+    banner("Couldn't host: " + e.message);
+    return;
   }
-  state.isHost = true;
   state.myId = state.net.myId;
-  state.worldSeed = Math.floor(Math.random() * 0x7fffffff);
-  buildPropsForSeed(state.worldSeed);
-  state.entities = placeEntities(state.worldSeed);
-  for (const [id, e] of Object.entries(state.entities)) {
-    const m = ensureEntityMesh(id, e);
-    m.position.set(e.x, heightAt(e.x, e.z), e.z);
-  }
 
-  // Show lobby (host sees the Enter button)
-  $("#screen-start").classList.add("hidden");
-  $("#room-code-display").textContent = state.roomCode;
+  buildTrack(state.trackId);
+  ensureLocalCar();
+  positionCarsAtStart();
+
+  $("#screen-track").classList.add("hidden");
   $("#screen-lobby").classList.remove("hidden");
-  $("#enter-btn").classList.remove("hidden");
-  $("#lobby-hint").classList.remove("hidden");
-  $("#lobby-hint-join").classList.add("hidden");
-  state.phase = "lobby";
+  $("#room-code-display").textContent = state.roomCode;
+  $("#start-race-btn").classList.remove("hidden");
+  $("#lobby-wait").classList.add("hidden");
 
-  // Announce self
-  state.net.send({ type: "hello", id: state.myId, name: state.myName });
-  updatePlayerList();
+  state.net.send({ type: "hello", id: state.myId, name: state.myName, color: state.myColor });
+  updateLobby();
 }
 
-async function joinCoop() {
-  const name = $("#name").value.trim();
+async function startJoin() {
   const code = $("#room-code-input").value.trim().toUpperCase();
-  if (!name) return banner("Enter your name first.");
-  if (code.length !== 6) return banner("Enter a 6-char room code.");
-  state.myName = name;
-  state.roomCode = code;
+  if (code.length !== 6) return banner("Enter a 6-char room code");
+  state.solo = false;
+  state.isHost = false;
   state.net.onMessage = onMessage;
+  state.myName = $("#name").value.trim() || "Driver";
+
   try {
     await state.net.joinRoom(code);
   } catch (e) {
-    return banner("Could not join room: " + e.message);
+    banner("Couldn't join: " + e.message);
+    return;
   }
-  state.isHost = false;
   state.myId = state.net.myId;
+  state.roomCode = code;
 
-  $("#screen-start").classList.add("hidden");
-  $("#room-code-display").textContent = code;
+  $("#screen-title").classList.add("hidden");
   $("#screen-lobby").classList.remove("hidden");
-  // Joiners don't see Enter button — host starts the game
-  $("#enter-btn").classList.add("hidden");
-  $("#lobby-hint").classList.add("hidden");
-  $("#lobby-hint-join").classList.remove("hidden");
-  state.phase = "lobby";
+  $("#room-code-display").textContent = code;
+  $("#start-race-btn").classList.add("hidden");
+  $("#lobby-wait").classList.remove("hidden");
 
-  // Announce self — host will send snapshot
-  state.net.send({ type: "hello", id: state.myId, name: state.myName });
+  state.net.send({ type: "hello", id: state.myId, name: state.myName, color: state.myColor });
+  updateLobby();
 }
 
-function enterCoopGame() {
-  // Host triggers everyone to enter the game
-  if (state.isHost) {
-    state.net.send({
-      type: "start",
-      seed: state.worldSeed,
-      entities: state.entities,
-    });
-  }
-  enterGame();
-}
-
-function enterGame() {
+function startRaceAsHost() {
+  state.net.send({ type: "start-countdown", trackId: state.trackId });
   $("#screen-lobby").classList.add("hidden");
   $("#hud").classList.remove("hidden");
-  state.phase = "playing";
-  // Position player
-  const obj = state.controls.getObject();
-  obj.position.set(WORLD.SPAWN.x, heightAt(WORLD.SPAWN.x, WORLD.SPAWN.z) + PLAYER_HEIGHT, WORLD.SPAWN.z);
-  // Lock pointer
-  state.renderer.domElement.requestPointerLock?.();
-  state.controls.lock();
-  updateHUD();
-  updatePlayerList();
+  ensureLocalCar();
+  positionCarsAtStart();
+  beginCountdown();
+}
+
+function backToTitleFromTrack() {
+  $("#screen-track").classList.add("hidden");
+  $("#screen-title").classList.remove("hidden");
+}
+
+function gotoTrackPick(nextAction) {
+  $("#screen-title").classList.add("hidden");
+  $("#screen-track").classList.remove("hidden");
+  state._afterTrackPick = nextAction;
+}
+
+function confirmTrack() {
+  $("#screen-track").classList.add("hidden");
+  if (state._afterTrackPick === "solo") startSolo();
+  else if (state._afterTrackPick === "host") startHost();
 }
 
 function restart() {
   location.reload();
 }
 
-// ============================================================
-//  Input
-// ============================================================
-function setupInput() {
-  document.addEventListener("keydown", (e) => {
-    state.keys[e.key] = true;
-    unlockAudio();
-    if (state.phase === "playing") {
-      if (e.key === "1") useHpPotion();
-    }
-  });
-  document.addEventListener("keyup", (e) => {
-    state.keys[e.key] = false;
-  });
-
-  state.renderer.domElement.addEventListener("mousedown", (e) => {
-    unlockAudio();
-    if (state.phase !== "playing") return;
-    if (!state.controls.isLocked) {
-      state.controls.lock();
-      return;
-    }
-    if (e.button === 0) {
-      state.mouseDown = true;
-      attack();
-    } else if (e.button === 2) {
-      castFireball();
-    }
-  });
-  document.addEventListener("mouseup", (e) => {
-    if (e.button === 0) state.mouseDown = false;
-  });
-  // Suppress browser context menu for right-click
-  state.renderer.domElement.addEventListener("contextmenu", (e) => e.preventDefault());
-
-  // Unlock audio on any click anywhere
-  document.addEventListener("click", () => unlockAudio(), { once: false });
-}
-
-// ============================================================
+// =============================================================
 //  Main loop
-// ============================================================
+// =============================================================
 function loop() {
   const dt = Math.min(0.05, state.clock.getDelta());
 
-  // Interpolate remote players
-  for (const [id, p] of Object.entries(state.players)) {
-    if (!p.mesh) continue;
-    const lerpT = 0.18;
-    p.x = p.x + (p.tx - p.x) * lerpT;
-    p.y = p.y + (p.ty - p.y) * lerpT;
-    p.z = p.z + (p.tz - p.z) * lerpT;
-    p.mesh.position.set(p.x, p.y - PLAYER_HEIGHT, p.z);
+  // Countdown
+  if (state.phase === "countdown") tickCountdown(dt);
+
+  // Step local car inputs + physics
+  if (state.myCar) {
+    if (state.phase === "racing") {
+      state.myCar.setLocalInputs(state.keys);
+    } else {
+      state.myCar.throttle = 0; state.myCar.brake = 0; state.myCar.steerInput = 0; state.myCar.drifting = false; state.myCar.boostActive = false;
+    }
+    stepCarPhysics(state.myCar, dt, true);
   }
 
-  // Entity meshes follow logical positions
-  for (const [id, e] of Object.entries(state.entities)) {
-    const mesh = state.entityMeshes[id];
-    if (!mesh) continue;
-    if (e.x !== undefined) {
-      mesh.position.x = e.x;
-      mesh.position.z = e.z;
-      mesh.position.y = heightAt(e.x, e.z);
+  // AI cars
+  if (state.solo && (state.phase === "racing" || state.phase === "countdown")) {
+    for (const ai of state.aiDrivers) {
+      if (state.phase === "racing") ai.step(dt);
+      else { ai.car.throttle = 0; ai.car.brake = 0; ai.car.steerInput = 0; }
+      stepCarPhysics(ai.car, dt, false);
     }
-    // Face nearest player (for monsters)
-    if ((e.type === "wolf" || e.type === "skeleton" || e.type === "troll" || e.type === "dragon") && e.aggro !== false) {
-      const obj = state.controls.getObject();
-      let tx = obj.position.x, tz = obj.position.z, tD2 = (tx - e.x) ** 2 + (tz - e.z) ** 2;
-      for (const p of Object.values(state.players)) {
-        const d2 = (p.x - e.x) ** 2 + (p.z - e.z) ** 2;
-        if (d2 < tD2) { tx = p.x; tz = p.z; tD2 = d2; }
+  }
+
+  // Remote cars — interpolate position from network state
+  for (const [id, car] of Object.entries(state.cars)) {
+    if (id === state.myId) continue;
+    if (state.solo && state.aiDrivers.some(a => a.car === car)) continue; // AI handled above
+    if (car.tx !== undefined) {
+      const tt = Math.min(1, dt * 8);
+      car.pos.x += (car.tx - car.pos.x) * tt;
+      car.pos.y += (car.ty - car.pos.y) * tt;
+      car.pos.z += (car.tz - car.pos.z) * tt;
+      // Heading interpolate (shortest angle)
+      let dh = car.tHeading - car.heading;
+      while (dh > Math.PI) dh -= 2 * Math.PI;
+      while (dh < -Math.PI) dh += 2 * Math.PI;
+      car.heading += dh * tt;
+    }
+    car.step(dt);
+  }
+
+  // Update all car visuals
+  for (const car of Object.values(state.cars)) {
+    car.updateMesh(dt);
+    if (car.mesh.userData?.label) car.mesh.userData.label.lookAt(state.camera.position);
+  }
+
+  // FX — local-only feedback
+  if (state.myCar && state.phase === "racing") {
+    // Tire smoke when drifting fast
+    if (state.myCar.drifting && state.myCar.speed() > 18) {
+      // Each wheel
+      for (let i = 0; i < state.myCar.wheels.length; i++) {
+        const w = state.myCar.wheels[i];
+        const wp = new THREE.Vector3();
+        w.getWorldPosition(wp);
+        spawnSmoke(state.scene, wp, { count: 1, speed: 1.0, life: 0.7, size: 0.7 });
       }
-      const ang = Math.atan2(tx - e.x, tz - e.z);
-      mesh.rotation.y = ang;
+      setScreech(Math.min(1, state.myCar.speed() / 35));
+    } else if (state.myCar.onGrass && state.myCar.speed() > 8) {
+      const wp = new THREE.Vector3();
+      state.myCar.wheels[2].getWorldPosition(wp);
+      spawnDust(state.scene, wp);
+      stopScreech();
+    } else {
+      stopScreech();
     }
-    // HP bar update + billboard
-    if (mesh.userData?.hpBar) {
-      const bar = mesh.userData.hpBar;
-      const pct = Math.max(0, (e.hp || 0) / (e.maxHp || 1));
-      bar.userData.fill.scale.x = pct;
-      bar.userData.fill.position.x = -(1 - pct) * 0.5;
-      bar.visible = pct < 1.0;
-      bar.lookAt(state.camera.position);
+
+    // Boost trail
+    if (state.myCar.boostActive) {
+      const back = new THREE.Vector3(Math.sin(state.myCar.heading), 0, Math.cos(state.myCar.heading));
+      const trailPos = state.myCar.pos.clone().addScaledVector(back, -2.5);
+      trailPos.y += 0.55;
+      spawnBoostTrail(state.scene, trailPos);
     }
-    // Gold pile bob
-    if (e.type === "gold_pile") {
-      mesh.position.y = heightAt(e.x, e.z) + 0.4 + Math.sin(performance.now() * 0.003 + e.x) * 0.08;
-      mesh.rotation.y += dt * 1.4;
-    }
+  } else {
+    stopScreech();
   }
 
-  // Campfire flicker
-  if (state.fireLight) {
-    state.fireLight.intensity = 1.6 + Math.sin(performance.now() * 0.012) * 0.4 + Math.random() * 0.15;
-    state.fireMesh.scale.setScalar(0.9 + Math.sin(performance.now() * 0.018) * 0.12);
+  // Engine sound from local car
+  if (state.myCar) {
+    const speedN = Math.min(1, state.myCar.speed() / 60);
+    setEngine(speedN, state.myCar.throttle, state.myCar.boostActive);
+  } else {
+    silenceEngine();
   }
 
-  // Update HP bars to face camera (player labels too)
-  for (const p of Object.values(state.players)) {
-    if (p.mesh?.userData?.label) {
-      p.mesh.userData.label.lookAt(state.camera.position);
-    }
-  }
-
-  updatePlayer(dt);
-  hostTick(dt);
-  if (state.phase === "playing") updateHUD();
-
-  // Day/night
-  if (state.phase === "playing") updateDayNight(dt);
-
-  // FX
-  updateParticles(state.scene, dt);
-  updateDamageNumbers(state.scene, dt);
-  updateFireballs(dt);
-  updateFireflies(dt, performance.now());
-
-  // Loot drops bob and check pickup
-  for (const [id, l] of Object.entries(state.lootDrops)) {
-    l.mesh.position.y = heightAt(l.x, l.z) + 0.45 + Math.sin(performance.now() * 0.004 + l.x) * 0.08;
-    l.mesh.rotation.y += dt * 1.6;
-    // Pickup if local player walks over
-    if (state.alive && state.phase === "playing") {
-      const obj = state.controls.getObject();
-      const dx = obj.position.x - l.x, dz = obj.position.z - l.z;
-      if (dx * dx + dz * dz < 1.4 * 1.4 && !l.pending) {
-        l.pending = true;
-        state.net.send({ type: "loot-pickup", by: state.myId, id, kind: l.type });
-      }
-    }
-  }
-
-  // Camera shake
+  // Camera
+  updateChaseCamera(dt);
   applyCameraShake(state.camera, dt);
 
+  // Network broadcast (10-15 Hz)
+  const now = performance.now();
+  if (!state.solo && state.myCar && now - state.lastPosBroadcast > 80) {
+    state.lastPosBroadcast = now;
+    state.net.send({
+      type: "pos", id: state.myId,
+      x: state.myCar.pos.x, y: state.myCar.pos.y, z: state.myCar.pos.z,
+      h: state.myCar.heading,
+      b: state.myCar.boostActive, d: state.myCar.drifting,
+      lap: state.myCar.lap, cp: state.myCar.currentCheckpoint,
+      t: state.myCar.raceTime,
+    });
+  }
+
+  // HUD
+  updateHUD();
+
+  // FX update
+  updateParticles(state.scene, dt);
+
+  // Render
   state.composer.render(dt);
   requestAnimationFrame(loop);
 }
 
-// ============================================================
+// =============================================================
 //  Boot
-// ============================================================
+// =============================================================
 document.addEventListener("DOMContentLoaded", () => {
   initScene();
   setupInput();
 
-  $("#solo-btn").addEventListener("click", startSolo);
-  $("#host-btn").addEventListener("click", hostCoop);
-  $("#join-btn").addEventListener("click", joinCoop);
-  $("#enter-btn").addEventListener("click", enterCoopGame);
-  $("#restart-btn").addEventListener("click", restart);
+  // Title screen
+  renderColorPicker();
+  renderTrackPick();
+  state.minimapCtx = $("#minimap-canvas").getContext("2d");
+
+  $("#to-solo").addEventListener("click", () => gotoTrackPick("solo"));
+  $("#to-host").addEventListener("click", () => gotoTrackPick("host"));
+  $("#to-join").addEventListener("click", startJoin);
+  $("#track-back").addEventListener("click", backToTitleFromTrack);
+  $("#track-confirm").addEventListener("click", confirmTrack);
+  $("#start-race-btn").addEventListener("click", startRaceAsHost);
+  $("#finish-again").addEventListener("click", restart);
+  $("#finish-home").addEventListener("click", restart);
 
   loop();
 });

@@ -3,110 +3,116 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>The Shattered Vale</title>
+  <title>Throttle of Three</title>
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
   <canvas id="scene"></canvas>
 
-  <!-- Start screen -->
-  <section id="screen-start" class="overlay">
-    <div class="title-block">
-      <h1>The Shattered Vale</h1>
-      <p class="tagline">A valley remembers its dragon. Wake it. End it.</p>
+  <!-- Title -->
+  <section id="screen-title" class="overlay">
+    <div class="panel">
+      <h1>Throttle of Three</h1>
+      <p class="tagline">Three drivers. One circuit. One winner.</p>
 
       <div class="card">
-        <label for="name">Your name</label>
-        <input id="name" maxlength="20" placeholder="Wanderer" />
+        <label for="name">Driver name</label>
+        <input id="name" maxlength="18" placeholder="Driver" />
+      </div>
+
+      <div class="card">
+        <label>Choose your car color</label>
+        <div class="color-pick" id="color-pick"></div>
       </div>
 
       <div class="row">
-        <button id="solo-btn">Solo (you alone)</button>
-        <button id="host-btn" class="ghost">Host a co-op vale</button>
+        <button id="to-solo">Solo race</button>
+        <button id="to-host" class="ghost">Host co-op</button>
       </div>
 
-      <div class="or-divider">— or join —</div>
+      <div class="or-divider">— or —</div>
+
       <div class="row">
         <input id="room-code-input" maxlength="6" placeholder="ROOM CODE" style="text-transform:uppercase;letter-spacing:0.3em;text-align:center;" />
-        <button id="join-btn" class="ghost">Join</button>
+        <button id="to-join" class="ghost">Join</button>
       </div>
 
       <div class="hint">
-        <strong>WASD</strong> walk &nbsp;·&nbsp; <strong>Shift</strong> sprint &nbsp;·&nbsp; <strong>Space</strong> jump &nbsp;·&nbsp;
-        <strong>L-Click</strong> sword &nbsp;·&nbsp; <strong>R-Click</strong> fireball &nbsp;·&nbsp;
-        <strong>1</strong> HP potion &nbsp;·&nbsp; <strong>ESC</strong> release mouse
+        <strong>WASD</strong> drive &nbsp;·&nbsp; <strong>Shift</strong> drift &nbsp;·&nbsp; <strong>Space</strong> boost &nbsp;·&nbsp;
+        <strong>R</strong> respawn &nbsp;·&nbsp; <strong>C</strong> camera
       </div>
     </div>
   </section>
 
-  <!-- Lobby (waiting for players) -->
+  <!-- Track select -->
+  <section id="screen-track" class="overlay hidden">
+    <div class="panel">
+      <h2 id="track-pick-title">Pick a track</h2>
+      <div class="track-pick" id="track-pick"></div>
+      <div class="row">
+        <button id="track-back" class="ghost">Back</button>
+        <button id="track-confirm">Confirm</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- Lobby (multiplayer) -->
   <section id="screen-lobby" class="overlay hidden">
-    <div class="title-block">
-      <h2>The Vale Awaits</h2>
+    <div class="panel">
+      <h2>Pre-race lobby</h2>
       <div class="card">
-        <label>Share this room code with up to 2 companions</label>
-        <div class="room-code" id="room-code-display"></div>
+        <label>Track</label>
+        <div id="lobby-track" class="lobby-track">—</div>
       </div>
       <div class="card">
-        <div id="lobby-players" class="lobby-list"></div>
+        <label>Room code</label>
+        <div class="room-code" id="room-code-display">—</div>
       </div>
-      <button id="enter-btn">Enter the Vale</button>
-      <p class="muted-small" id="lobby-hint" style="margin-top:12px;">You can enter alone or wait for friends. They can join the running game at any time.</p>
-      <p class="muted-small hidden" id="lobby-hint-join" style="margin-top:12px;font-style:italic;">Waiting for the host to begin…</p>
+      <div class="card">
+        <div id="lobby-drivers" class="lobby-list"></div>
+      </div>
+      <button id="start-race-btn">Start race</button>
+      <p class="muted-small hidden" id="lobby-wait">Waiting for the host to start…</p>
     </div>
   </section>
 
-  <!-- HUD -->
+  <!-- Race HUD -->
   <div id="hud" class="hidden">
-    <div id="vitals">
-      <div class="vital-row">
-        <div class="vital-label">HP</div>
-        <div class="vital-bar"><div id="hp-fill"></div></div>
-        <div class="vital-num" id="hp-num">100/100</div>
-      </div>
-      <div class="vital-row mp">
-        <div class="vital-label">MP</div>
-        <div class="vital-bar"><div id="mp-fill"></div></div>
-        <div class="vital-num" id="mp-num">50/50</div>
-      </div>
-      <div class="vital-row gold">
-        <div class="vital-label">★</div>
-        <div class="vital-num" id="gold-num">0</div>
-      </div>
-      <div class="potion-row">
-        <div class="potion-slot"><span class="key">1</span> <span class="icon">⚗</span> <span id="potion-count">0</span></div>
-      </div>
+    <div id="speedo">
+      <div class="speed-num" id="speed-num">0</div>
+      <div class="speed-unit">km/h</div>
+      <div class="boost-bar"><div id="boost-fill"></div></div>
+      <div class="boost-label">BOOST</div>
     </div>
 
-    <div id="objective">
-      <div class="obj-title">Objective</div>
-      <div id="obj-text">Find the dragon on the eastern peak.</div>
-      <div class="obj-distance" id="obj-distance">— —</div>
+    <div id="race-info">
+      <div class="line"><span class="hint-label">LAP</span> <span id="lap-num">1/3</span></div>
+      <div class="line"><span class="hint-label">POS</span> <span id="pos-num">1/1</span></div>
+      <div class="line"><span class="hint-label">TIME</span> <span id="race-time">0:00.00</span></div>
+      <div class="line dim"><span class="hint-label">BEST</span> <span id="best-lap">—</span></div>
     </div>
 
-    <div id="player-list"></div>
+    <div id="standings"></div>
 
-    <div id="crosshair">·</div>
-    <div id="interact-prompt" class="hidden"><kbd>E</kbd> <span id="interact-text">Interact</span></div>
-
-    <div id="boss-bar" class="hidden">
-      <div class="boss-name">The Pale Dragon</div>
-      <div class="boss-hp"><div id="boss-hp-fill"></div></div>
+    <div id="minimap">
+      <canvas id="minimap-canvas" width="180" height="180"></canvas>
     </div>
 
-    <div id="event-log"></div>
+    <div id="centermsg" class="hidden"></div>
   </div>
 
-  <!-- End screen -->
-  <section id="screen-end" class="overlay hidden">
-    <div class="title-block">
-      <h2 id="end-title">The Vale Is Yours</h2>
-      <div id="end-stats" class="end-stats"></div>
-      <button id="restart-btn">Walk it again</button>
+  <!-- Finish screen -->
+  <section id="screen-finish" class="overlay hidden">
+    <div class="panel">
+      <h2 id="finish-title">Race complete</h2>
+      <div id="finish-results" class="end-stats"></div>
+      <div class="row">
+        <button id="finish-again">Race again</button>
+        <button id="finish-home" class="ghost">Title</button>
+      </div>
     </div>
   </section>
 
-  <!-- Banner -->
   <div id="banner" class="hidden"></div>
 
   <script type="module" src="game.js"></script>
