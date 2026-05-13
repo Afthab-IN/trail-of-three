@@ -5,6 +5,7 @@ import { UnrealBloomPass } from "https://esm.sh/three@0.160.0/examples/jsm/postp
 import { OutputPass } from "https://esm.sh/three@0.160.0/examples/jsm/postprocessing/OutputPass.js";
 import { Sky } from "https://esm.sh/three@0.160.0/examples/jsm/objects/Sky.js";
 import { GLTFLoader } from "https://esm.sh/three@0.160.0/examples/jsm/loaders/GLTFLoader.js";
+import { DRACOLoader } from "https://esm.sh/three@0.160.0/examples/jsm/loaders/DRACOLoader.js";
 import { RoomEnvironment } from "https://esm.sh/three@0.160.0/examples/jsm/environments/RoomEnvironment.js";
 
 import { TRACKS, TRACK_WIDTH, buildTrackGeometry, nearestOnTrack, CHECKPOINT_COUNT } from "./track.js";
@@ -117,6 +118,9 @@ let ferrariLoaded = false;
 let ferrariTemplate = null;
 function loadFerrariModel() {
   const loader = new GLTFLoader();
+  const draco = new DRACOLoader();
+  draco.setDecoderPath("https://www.gstatic.com/draco/versioned/decoders/1.5.6/");
+  loader.setDRACOLoader(draco);
   const url = "https://threejs.org/examples/models/gltf/ferrari.glb";
   loader.load(
     url,
