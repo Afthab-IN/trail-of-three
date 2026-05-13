@@ -135,7 +135,7 @@ function loadFerrariModel() {
       });
       ferrariTemplate = car;
       ferrariLoaded = true;
-      // Upgrade existing cars on next frame
+      console.log("Ferrari model loaded — upgrading", Object.keys(state.cars).length, "cars");
       for (const c of Object.values(state.cars)) {
         upgradeCarMeshToFerrari(c);
       }
@@ -702,6 +702,10 @@ function spawnCar({ id, name, color, isLocal }) {
   if (state.cars[id]) return state.cars[id];
   const car = new Car({ id, name, color, isLocal, scene: state.scene });
   state.cars[id] = car;
+  // If the Ferrari model already loaded, upgrade immediately
+  if (ferrariLoaded && ferrariTemplate) {
+    upgradeCarMeshToFerrari(car);
+  }
   return car;
 }
 
