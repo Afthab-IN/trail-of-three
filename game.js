@@ -119,9 +119,10 @@ let ferrariTemplate = null;
 function loadFerrariModel() {
   const loader = new GLTFLoader();
   const draco = new DRACOLoader();
-  draco.setDecoderPath("https://www.gstatic.com/draco/versioned/decoders/1.5.6/");
+  // Decoder files are bundled in the repo at /draco/
+  draco.setDecoderPath("./draco/");
   loader.setDRACOLoader(draco);
-  const url = "https://threejs.org/examples/models/gltf/ferrari.glb";
+  const url = "./models/ferrari.glb";
   loader.load(
     url,
     (gltf) => {
@@ -151,7 +152,6 @@ function upgradeCarMeshToFerrari(car) {
   if (!ferrariTemplate || car._ferrariUpgraded) return;
   car._ferrariUpgraded = true;
 
-  // Remove old procedural mesh children (keep label)
   const label = car.mesh.userData?.label;
   const oldBody = car.mesh.userData?.bodyPivot;
   if (oldBody) car.mesh.remove(oldBody);
@@ -159,27 +159,33 @@ function upgradeCarMeshToFerrari(car) {
 
   const clone = ferrariTemplate.clone(true);
   clone.scale.setScalar(1.0);
-  // The Ferrari model's body color comes from a "body" material — tint it
-  clone.traverse((c) => {
-    if (!c.isMesh) return;
-    const m = c.material;
-    if (!m) return;
-    if (m.name === "body" || m.name === "Body" || (m.color && m.metalness > 0.5)) {
-      const tinted = m.clone();
-      tinted.color.setHex(car.color);
-      tinted.metalness = 0.85;
-      tinted.roughness = 0.18;
-      tinted.envMapIntensity = 1.0;
-      c.material = tinted;
-    }
+  clone.position.set(0, 0, 0);
+
+  // Apply proper Three.js Ferrari-demo materials by MESH NAME
+  const bodyMat = new THREE.MeshPhysicalMaterial({
+    color: car.color, metalness: 1.0, roughness: 0.4,
+    clearcoat: 1.0, clearcoatRoughness: 0.05, envMapIntensity: 1.2,
+  });
+  const detailMat = new THREE.MeshStandardMaterial({
+    color: 0xb8b8c0, metalness: 1.0, roughness: 0.25, envMapIntensity: 1.0,
+  });
+  const glassMat = new THREE.MeshPhysicalMaterial({
+    color: 0xffffff, metalness: 0.25, roughness: 0.0,
+    transmission: 1.0, transparent: true, ior: 1.5,
   });
 
-  // Identify wheels by name (Ferrari model uses wheel_fl, wheel_fr, wheel_rl, wheel_rr)
   const wheels = [];
   clone.traverse((c) => {
-    if (c.name && /^wheel/i.test(c.name)) {
-      const isFront = /fl|fr/i.test(c.name);
-      wheels.push({ mesh: c, steered: isFront, baseRotation: c.rotation.clone() });
+    if (!c.isMesh) return;
+    c.castShadow = true;
+    c.receiveShadow = true;
+    const name = c.name || "";
+    if (name === "body") c.material = bodyMat;
+    else if (name.startsWith("rim_")) c.material = detailMat;
+    else if (name === "glass") c.material = glassMat;
+    if (name.startsWith("wheel_")) {
+      const isFront = /_fl|_fr$/i.test(name);
+      wheels.push({ mesh: c, steered: isFront });
     }
   });
 
@@ -187,10 +193,7 @@ function upgradeCarMeshToFerrari(car) {
   car.mesh.userData.body = clone;
   car.mesh.userData.wheels = wheels;
   car.wheels = wheels;
-  if (label) {
-    // Keep label
-    label.position.y = 1.8;
-  }
+  if (label) label.position.y = 1.7;
 }
 
 function onResize() {
