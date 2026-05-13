@@ -1,8 +1,22 @@
 import * as THREE from "https://esm.sh/three@0.160.0";
 import { PointerLockControls } from "https://esm.sh/three@0.160.0/examples/jsm/controls/PointerLockControls.js";
+import { EffectComposer } from "https://esm.sh/three@0.160.0/examples/jsm/postprocessing/EffectComposer.js";
+import { RenderPass } from "https://esm.sh/three@0.160.0/examples/jsm/postprocessing/RenderPass.js";
+import { UnrealBloomPass } from "https://esm.sh/three@0.160.0/examples/jsm/postprocessing/UnrealBloomPass.js";
+import { OutputPass } from "https://esm.sh/three@0.160.0/examples/jsm/postprocessing/OutputPass.js";
 
 import { WORLD, heightAt, isWater, buildTerrainGeometry, placeProps, placeEntities } from "./world.js";
 import { Net, makeRoomCode } from "./net.js";
+import {
+  sfxSwordSwing, sfxHit, sfxEnemyDeath, sfxPlayerHurt, sfxFireball, sfxFireballHit,
+  sfxPickup, sfxPotion, sfxJump, sfxFootstep, sfxDragonRoar, sfxVictory, unlockAudio,
+} from "./audio.js";
+import {
+  spawnParticleBurst, spawnTrailParticle, updateParticles,
+  spawnDamageNumber, updateDamageNumbers,
+  cameraShake, applyCameraShake,
+  spawnFireflies, updateFireflies,
+} from "./fx.js";
 
 // ============================================================
 //  State
@@ -29,10 +43,24 @@ const state = {
   attackCd: 0,              // seconds left before next swing
   hp: 100,
   maxHp: 100,
+  mp: 50,
+  maxMp: 50,
+  manaRegen: 6,             // per second
+  hpPotions: 1,
   gold: 0,
   alive: true,
   lastHurtAt: 0,
   respawnAt: 0,
+  footstepT: 0,
+  fireballCd: 0,
+  composer: null,
+  bloom: null,
+  sun: null,
+  hemiLight: null,
+  dayT: 0.30,               // 0 = midnight, 0.5 = noon, 1 = midnight
+  fireballs: [],            // { mesh, dir, life, owner, target? }
+  lootDrops: {},            // id -> { type, x, z, mesh }
+  trailEmit: 0,
 
   // Remote players: id -> { name, mesh, x, y, z, rotY, hp, maxHp, gold, alive, tx, ty, tz, lastUpdate }
   players: {},
@@ -88,13 +116,29 @@ function initScene() {
   camera.position.set(WORLD.SPAWN.x, 5, WORLD.SPAWN.z);
   state.camera = camera;
 
-  // Hemisphere + directional sun
+  // Hemisphere + directional sun (controlled by day/night cycle)
   const hemi = new THREE.HemisphereLight(0xb0c8e8, 0x2a2418, 0.65);
   scene.add(hemi);
+  state.hemiLight = hemi;
 
   const sun = new THREE.DirectionalLight(0xfff0c8, 1.0);
   sun.position.set(120, 180, 60);
   scene.add(sun);
+  state.sun = sun;
+
+  // Post-processing — selective bloom on emissive things (lanterns, gold, fireballs, eyes)
+  const composer = new EffectComposer(state.renderer);
+  composer.addPass(new RenderPass(scene, camera));
+  const bloom = new UnrealBloomPass(
+    new THREE.Vector2(window.innerWidth, window.innerHeight),
+    0.85,   // strength
+    0.55,   // radius
+    0.78    // threshold
+  );
+  composer.addPass(bloom);
+  composer.addPass(new OutputPass());
+  state.composer = composer;
+  state.bloom = bloom;
 
   // Sky dome — large back sphere with gradient
   const skyGeo = new THREE.SphereGeometry(400, 24, 16);
@@ -150,6 +194,9 @@ function initScene() {
   // Trees and rocks
   buildPropsForSeed(state.worldSeed ?? 20260513);
 
+  // Fireflies float through the spawn-camp area for ambient life
+  spawnFireflies(scene, 70, { x: 80, z: 80 });
+
   // Spawn camp marker — wooden sign + campfire
   buildSpawnCamp();
 
@@ -178,6 +225,8 @@ function onResize() {
   state.camera.aspect = window.innerWidth / window.innerHeight;
   state.camera.updateProjectionMatrix();
   state.renderer.setSize(window.innerWidth, window.innerHeight);
+  if (state.composer) state.composer.setSize(window.innerWidth, window.innerHeight);
+  if (state.bloom) state.bloom.setSize(window.innerWidth, window.innerHeight);
 }
 
 // ============================================================
@@ -533,6 +582,68 @@ function removeEntityMesh(id) {
   }
 }
 
+function spawnLootDrop(id, drop) {
+  if (state.lootDrops[id]) return;
+  let mesh;
+  if (drop.type === "hp_potion") {
+    const g = new THREE.Group();
+    const bottle = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.18, 0.22, 0.45, 8),
+      new THREE.MeshStandardMaterial({ color: 0xc45c5c, emissive: 0xc45c5c, emissiveIntensity: 0.7, transparent: true, opacity: 0.9 })
+    );
+    g.add(bottle);
+    const neck = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.07, 0.09, 0.18, 6),
+      new THREE.MeshStandardMaterial({ color: 0x3a2615 })
+    );
+    neck.position.y = 0.3;
+    g.add(neck);
+    const light = new THREE.PointLight(0xff6868, 0.8, 4, 2);
+    light.position.y = 0.5;
+    g.add(light);
+    mesh = g;
+  } else {
+    mesh = new THREE.Mesh(new THREE.SphereGeometry(0.3, 6, 6), new THREE.MeshBasicMaterial({ color: 0xffffff }));
+  }
+  mesh.position.set(drop.x, heightAt(drop.x, drop.z) + 0.45, drop.z);
+  state.scene.add(mesh);
+  state.lootDrops[id] = { ...drop, mesh, id };
+}
+
+function removeLootDrop(id) {
+  const l = state.lootDrops[id];
+  if (l) {
+    state.scene.remove(l.mesh);
+    delete state.lootDrops[id];
+  }
+}
+
+function updateDayNight(dt) {
+  // 0..1 maps to one full cycle. 0=midnight, 0.5=noon, 1=midnight again.
+  // ~6 minute cycle for some atmosphere variety.
+  state.dayT = (state.dayT + dt / 360) % 1;
+  const t = state.dayT;
+  const sunAngle = (t - 0.25) * Math.PI * 2; // 0.25 = sunrise
+  const sx = Math.cos(sunAngle) * 200;
+  const sy = Math.sin(sunAngle) * 200;
+  state.sun.position.set(sx, Math.max(20, sy), 80);
+
+  // Intensity: bright during day, dim at night
+  const dayness = Math.max(0, Math.sin(sunAngle));
+  state.sun.intensity = 0.2 + dayness * 0.9;
+  state.hemiLight.intensity = 0.3 + dayness * 0.5;
+
+  // Tint
+  const dayColor = new THREE.Color(0x88a0c0);
+  const nightColor = new THREE.Color(0x0a0814);
+  const tint = nightColor.clone().lerp(dayColor, dayness);
+  state.scene.background = tint;
+  state.scene.fog.color = tint;
+
+  // Bloom strength rises slightly at night for atmosphere
+  if (state.bloom) state.bloom.strength = 0.85 + (1 - dayness) * 0.6;
+}
+
 // ============================================================
 //  Player movement & combat
 // ============================================================
@@ -577,7 +688,22 @@ function updatePlayer(dt) {
   if (state.keys[" "] && state.onGround) {
     state.vel.y = JUMP_VEL;
     state.onGround = false;
+    sfxJump();
   }
+
+  // Footstep audio when walking on ground
+  if (state.onGround && (fwd !== 0 || strafe !== 0)) {
+    state.footstepT += dt;
+    const stepInterval = sprinting ? 0.32 : 0.46;
+    if (state.footstepT > stepInterval) {
+      state.footstepT = 0;
+      sfxFootstep();
+    }
+  }
+
+  // Mana regen + cooldown decrement
+  state.mp = Math.min(state.maxMp, state.mp + state.manaRegen * dt);
+  if (state.fireballCd > 0) state.fireballCd -= dt;
 
   // Constrain to world
   const lim = WORLD.SIZE - 5;
@@ -644,6 +770,7 @@ function attack() {
   if (!state.controls.isLocked) return;
   state.attackCd = ATTACK_CD;
   state.swingT = 0.35;
+  sfxSwordSwing();
 
   // Find nearest enemy in front of player within ATTACK_RANGE
   const obj = state.controls.getObject();
@@ -665,6 +792,108 @@ function attack() {
   if (bestId) {
     state.net.send({ type: "attack-entity", who: state.myId, target: bestId, dmg: ATTACK_DMG });
   }
+}
+
+function castFireball() {
+  if (!state.alive || state.fireballCd > 0 || state.phase !== "playing") return;
+  if (!state.controls.isLocked) return;
+  if (state.mp < 18) {
+    showEvent("Not enough mana", "");
+    return;
+  }
+  state.mp -= 18;
+  state.fireballCd = 0.7;
+  sfxFireball();
+  updateHUD();
+
+  const dir = new THREE.Vector3();
+  state.camera.getWorldDirection(dir);
+  const origin = state.camera.position.clone();
+  origin.addScaledVector(dir, 0.5);
+  spawnFireball(origin, dir.normalize().clone(), state.myId);
+  state.net.send({ type: "fireball", from: state.myId, x: origin.x, y: origin.y, z: origin.z, dx: dir.x, dy: dir.y, dz: dir.z });
+}
+
+function spawnFireball(pos, dir, owner) {
+  const mesh = new THREE.Mesh(
+    new THREE.SphereGeometry(0.32, 8, 8),
+    new THREE.MeshStandardMaterial({
+      color: 0xff8030, emissive: 0xff6020, emissiveIntensity: 2.5, transparent: true, opacity: 0.95,
+    })
+  );
+  mesh.position.copy(pos);
+  state.scene.add(mesh);
+  const light = new THREE.PointLight(0xff8030, 1.2, 8, 2);
+  mesh.add(light);
+  state.fireballs.push({
+    mesh, dir: dir.clone(), life: 2.2, owner, speed: 30,
+  });
+}
+
+function updateFireballs(dt) {
+  for (let i = state.fireballs.length - 1; i >= 0; i--) {
+    const fb = state.fireballs[i];
+    fb.life -= dt;
+    fb.mesh.position.addScaledVector(fb.dir, fb.speed * dt);
+
+    // Trail
+    state.trailEmit = (state.trailEmit || 0) + dt;
+    if (state.trailEmit > 0.025) {
+      state.trailEmit = 0;
+      spawnTrailParticle(state.scene, fb.mesh.position, { color: 0xff7030, life: 0.4, size: 0.5 });
+    }
+
+    // Ground collision
+    const gy = heightAt(fb.mesh.position.x, fb.mesh.position.z);
+    let hit = false;
+    if (fb.mesh.position.y < gy + 0.1) hit = true;
+
+    // Entity hit (host authoritative — only host applies damage but everyone shows fx)
+    if (!hit) {
+      for (const [id, e] of Object.entries(state.entities)) {
+        if (e.type !== "wolf" && e.type !== "skeleton" && e.type !== "troll" && e.type !== "dragon") continue;
+        const dx = fb.mesh.position.x - e.x;
+        const dz = fb.mesh.position.z - e.z;
+        const ey = heightAt(e.x, e.z) + 1.2;
+        const dy = fb.mesh.position.y - ey;
+        const r = (e.type === "dragon" ? 3.5 : 1.0);
+        if (dx * dx + dy * dy + dz * dz < r * r) {
+          // Local visual hit
+          spawnParticleBurst(state.scene, fb.mesh.position, { count: 24, color: 0xff6030, speed: 6, life: 0.8 });
+          sfxFireballHit();
+          cameraShake(0.25, 0.25);
+          // Host applies damage
+          if (fb.owner === state.myId) {
+            state.net.send({ type: "attack-entity", who: state.myId, target: id, dmg: 38 });
+          }
+          hit = true;
+          break;
+        }
+      }
+    }
+
+    if (hit || fb.life <= 0) {
+      if (hit) {
+        spawnParticleBurst(state.scene, fb.mesh.position, { count: 18, color: 0xffa040, speed: 5, life: 0.6 });
+        sfxFireballHit();
+      }
+      state.scene.remove(fb.mesh);
+      fb.mesh.material.dispose();
+      state.fireballs.splice(i, 1);
+    }
+  }
+}
+
+function useHpPotion() {
+  if (state.hpPotions <= 0) return;
+  if (state.hp >= state.maxHp) return;
+  state.hpPotions--;
+  const heal = 40;
+  state.hp = Math.min(state.maxHp, state.hp + heal);
+  sfxPotion();
+  spawnParticleBurst(state.scene, state.camera.position, { count: 14, color: 0x6ec79b, speed: 2.5, life: 0.5, upward: 1.2 });
+  showEvent(`+${heal} HP`, "heal");
+  updateHUD();
 }
 
 function respawnLocal() {
@@ -713,9 +942,6 @@ function hostTick(dt) {
     if (e.type === "dragon") {
       if (!e.aggro && d < e.sightRange) {
         e.aggro = true;
-        state.bossAggro = true;
-        broadcastEvent("The Pale Dragon stirs.");
-        $("#boss-bar").classList.remove("hidden");
         state.net.send({ type: "boss-aggro" });
       }
       if (!e.aggro) continue;
@@ -866,12 +1092,17 @@ function onMessage(msg) {
       if (!state.isHost) return;
       const e = state.entities[msg.target];
       if (!e) return;
-      // Check range from attacker server-side too — trust client for now
       e.hp = (e.hp || 0) - (msg.dmg || 0);
+      // Tell all clients to show damage number + hit particles at this entity
+      state.net.send({ type: "entity-hurt", id: msg.target, dmg: msg.dmg, x: e.x, z: e.z });
       if (e.hp <= 0) {
-        // Award gold
+        // Loot drop chance (host rolls)
+        let drop = null;
+        if (Math.random() < 0.35 && e.type !== "dragon") {
+          drop = { type: "hp_potion", x: e.x, z: e.z };
+        }
         const goldAward = e.gold || 0;
-        state.net.send({ type: "kill-entity", id: e.id || msg.target, by: msg.who, gold: goldAward, kind: e.type });
+        state.net.send({ type: "kill-entity", id: e.id || msg.target, by: msg.who, gold: goldAward, kind: e.type, x: e.x, z: e.z, drop });
         delete state.entities[msg.target];
         if (e.type === "dragon") {
           state.net.send({ type: "victory", by: msg.who });
@@ -882,8 +1113,31 @@ function onMessage(msg) {
       }
       break;
     }
+    case "entity-hurt": {
+      // All clients show feedback
+      const yWorld = heightAt(msg.x, msg.z) + 1.6;
+      const pos = new THREE.Vector3(msg.x, yWorld, msg.z);
+      spawnDamageNumber(state.scene, pos, "-" + msg.dmg, { color: "#ffe080" });
+      spawnParticleBurst(state.scene, pos, { count: 10, color: 0xff5050, speed: 4, life: 0.4 });
+      sfxHit();
+      break;
+    }
     case "kill-entity": {
-      // All clients: remove mesh, show event
+      // All clients: death poof, sound, remove mesh
+      const yWorld = heightAt(msg.x ?? 0, msg.z ?? 0) + 0.6;
+      const pos = new THREE.Vector3(msg.x ?? 0, yWorld, msg.z ?? 0);
+      spawnParticleBurst(state.scene, pos, {
+        count: 26,
+        color: msg.kind === "dragon" ? 0xff4030 : 0x603020,
+        emissive: msg.kind === "dragon" ? 0xff6040 : 0x301810,
+        speed: 6, life: 0.9, upward: 1.2,
+      });
+      sfxEnemyDeath();
+      if (msg.kind === "dragon") {
+        cameraShake(0.9, 0.8);
+        spawnParticleBurst(state.scene, pos, { count: 80, color: 0xff7050, speed: 10, life: 1.4, upward: 1.4 });
+        sfxVictory();
+      }
       removeEntityMesh(msg.id);
       delete state.entities[msg.id];
       if (msg.kind === "dragon") {
@@ -898,6 +1152,11 @@ function onMessage(msg) {
       } else if (state.players[msg.by]) {
         state.players[msg.by].gold = (state.players[msg.by].gold || 0) + (msg.gold || 0);
         updatePlayerList();
+      }
+      // Spawn loot drop (mesh visible to all)
+      if (msg.drop) {
+        const dropId = "drop_" + msg.id;
+        spawnLootDrop(dropId, msg.drop);
       }
       break;
     }
@@ -916,6 +1175,13 @@ function onMessage(msg) {
       break;
     }
     case "picked-up": {
+      // Sparkle + sound
+      const e = state.entities[msg.id];
+      if (e) {
+        const pos = new THREE.Vector3(e.x, heightAt(e.x, e.z) + 0.6, e.z);
+        spawnParticleBurst(state.scene, pos, { count: 14, color: 0xf5c97a, speed: 3, life: 0.7, upward: 1.6 });
+      }
+      sfxPickup();
       removeEntityMesh(msg.id);
       delete state.entities[msg.id];
       if (msg.by === state.myId) {
@@ -928,17 +1194,41 @@ function onMessage(msg) {
       }
       break;
     }
+    case "fireball": {
+      // Other players' fireballs — render visual only (host handles damage)
+      if (msg.from === state.myId) return;
+      const pos = new THREE.Vector3(msg.x, msg.y, msg.z);
+      const dir = new THREE.Vector3(msg.dx, msg.dy, msg.dz);
+      spawnFireball(pos, dir, msg.from);
+      break;
+    }
+    case "loot-pickup": {
+      // Local player picked up potion
+      if (msg.by === state.myId) {
+        if (msg.kind === "hp_potion") {
+          state.hpPotions = Math.min(5, state.hpPotions + 1);
+          showEvent("HP Potion picked up", "heal");
+          sfxPickup();
+        }
+        updateHUD();
+      }
+      removeLootDrop(msg.id);
+      break;
+    }
     case "player-dmg": {
       // Apply to local player or remote
       if (msg.id === state.myId) {
         state.hp = Math.max(0, state.hp - msg.dmg);
         state.lastHurtAt = performance.now();
         flashHurt();
+        sfxPlayerHurt();
+        cameraShake(0.5, 0.35);
         if (state.hp <= 0) {
           state.alive = false;
           state.respawnAt = performance.now() + 4000;
           showEvent("You fell. Respawning…", "kill");
           state.net.send({ type: "player-died", id: state.myId });
+          spawnParticleBurst(state.scene, state.camera.position, { count: 40, color: 0xc45c5c, speed: 5, life: 1.0, upward: 1.5 });
         }
         updateHUD();
       } else if (state.players[msg.id]) {
@@ -971,6 +1261,8 @@ function onMessage(msg) {
       state.bossAggro = true;
       $("#boss-bar").classList.remove("hidden");
       showEvent("The Pale Dragon stirs.", "kill");
+      sfxDragonRoar();
+      cameraShake(0.6, 0.8);
       break;
     }
     case "victory": {
@@ -1001,7 +1293,11 @@ function updateHUD() {
   const pct = (state.hp / state.maxHp) * 100;
   $("#hp-fill").style.width = pct + "%";
   $("#hp-num").textContent = `${Math.max(0, Math.floor(state.hp))}/${state.maxHp}`;
+  const mpPct = (state.mp / state.maxMp) * 100;
+  $("#mp-fill").style.width = mpPct + "%";
+  $("#mp-num").textContent = `${Math.max(0, Math.floor(state.mp))}/${state.maxMp}`;
   $("#gold-num").textContent = state.gold;
+  $("#potion-count").textContent = state.hpPotions;
 
   // Boss bar
   const boss = state.entities["boss"];
@@ -1237,12 +1533,17 @@ function restart() {
 function setupInput() {
   document.addEventListener("keydown", (e) => {
     state.keys[e.key] = true;
+    unlockAudio();
+    if (state.phase === "playing") {
+      if (e.key === "1") useHpPotion();
+    }
   });
   document.addEventListener("keyup", (e) => {
     state.keys[e.key] = false;
   });
 
   state.renderer.domElement.addEventListener("mousedown", (e) => {
+    unlockAudio();
     if (state.phase !== "playing") return;
     if (!state.controls.isLocked) {
       state.controls.lock();
@@ -1251,11 +1552,18 @@ function setupInput() {
     if (e.button === 0) {
       state.mouseDown = true;
       attack();
+    } else if (e.button === 2) {
+      castFireball();
     }
   });
   document.addEventListener("mouseup", (e) => {
     if (e.button === 0) state.mouseDown = false;
   });
+  // Suppress browser context menu for right-click
+  state.renderer.domElement.addEventListener("contextmenu", (e) => e.preventDefault());
+
+  // Unlock audio on any click anywhere
+  document.addEventListener("click", () => unlockAudio(), { once: false });
 }
 
 // ============================================================
@@ -1327,12 +1635,34 @@ function loop() {
   hostTick(dt);
   if (state.phase === "playing") updateHUD();
 
-  // Check win condition for non-host (host triggers via victory msg)
-  if (state.phase === "playing" && !state.entities["boss"] && state.bossAggro && state.isHost) {
-    // Host already broadcast victory in attack-entity handler
+  // Day/night
+  if (state.phase === "playing") updateDayNight(dt);
+
+  // FX
+  updateParticles(state.scene, dt);
+  updateDamageNumbers(state.scene, dt);
+  updateFireballs(dt);
+  updateFireflies(dt, performance.now());
+
+  // Loot drops bob and check pickup
+  for (const [id, l] of Object.entries(state.lootDrops)) {
+    l.mesh.position.y = heightAt(l.x, l.z) + 0.45 + Math.sin(performance.now() * 0.004 + l.x) * 0.08;
+    l.mesh.rotation.y += dt * 1.6;
+    // Pickup if local player walks over
+    if (state.alive && state.phase === "playing") {
+      const obj = state.controls.getObject();
+      const dx = obj.position.x - l.x, dz = obj.position.z - l.z;
+      if (dx * dx + dz * dz < 1.4 * 1.4 && !l.pending) {
+        l.pending = true;
+        state.net.send({ type: "loot-pickup", by: state.myId, id, kind: l.type });
+      }
+    }
   }
 
-  state.renderer.render(state.scene, state.camera);
+  // Camera shake
+  applyCameraShake(state.camera, dt);
+
+  state.composer.render(dt);
   requestAnimationFrame(loop);
 }
 

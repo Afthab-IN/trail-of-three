@@ -33,7 +33,8 @@
 
       <div class="hint">
         <strong>WASD</strong> walk &nbsp;·&nbsp; <strong>Shift</strong> sprint &nbsp;·&nbsp; <strong>Space</strong> jump &nbsp;·&nbsp;
-        <strong>Mouse</strong> look &nbsp;·&nbsp; <strong>Click</strong> swing sword &nbsp;·&nbsp; <strong>ESC</strong> release mouse
+        <strong>L-Click</strong> sword &nbsp;·&nbsp; <strong>R-Click</strong> fireball &nbsp;·&nbsp;
+        <strong>1</strong> HP potion &nbsp;·&nbsp; <strong>ESC</strong> release mouse
       </div>
     </div>
   </section>
@@ -63,9 +64,17 @@
         <div class="vital-bar"><div id="hp-fill"></div></div>
         <div class="vital-num" id="hp-num">100/100</div>
       </div>
+      <div class="vital-row mp">
+        <div class="vital-label">MP</div>
+        <div class="vital-bar"><div id="mp-fill"></div></div>
+        <div class="vital-num" id="mp-num">50/50</div>
+      </div>
       <div class="vital-row gold">
         <div class="vital-label">★</div>
         <div class="vital-num" id="gold-num">0</div>
+      </div>
+      <div class="potion-row">
+        <div class="potion-slot"><span class="key">1</span> <span class="icon">⚗</span> <span id="potion-count">0</span></div>
       </div>
     </div>
 

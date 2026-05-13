@@ -253,6 +253,41 @@ kbd {
   transition: width 0.25s;
 }
 
+#mp-fill {
+  height: 100%;
+  width: 100%;
+  background: linear-gradient(90deg, #5a5af0, #8ac0ff);
+  transition: width 0.2s;
+}
+.vital-row.mp .vital-label { color: #8ac0ff; }
+.vital-row.mp .vital-num { color: #b0d0ff; }
+
+.potion-row {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+}
+.potion-slot {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  background: rgba(196, 92, 92, 0.15);
+  border: 1px solid var(--hp-low);
+  border-radius: 6px;
+  font-size: 0.85rem;
+  color: var(--fg);
+}
+.potion-slot .key {
+  background: rgba(255,255,255,0.1);
+  border: 1px solid rgba(255,255,255,0.2);
+  border-radius: 3px;
+  padding: 0px 5px;
+  font-family: monospace;
+  font-size: 0.75rem;
+}
+.potion-slot .icon { color: var(--hp-low); font-size: 1.1rem; }
+
 .vital-num {
   color: var(--fg);
   font-family: monospace;
