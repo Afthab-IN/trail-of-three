@@ -166,13 +166,21 @@ export class Car {
     this.mesh.position.copy(this.pos);
     this.mesh.rotation.y = this.heading;
 
-    // Wheel spin & steer
+    // Wheel spin & steer — handle both procedural (Group with userData.steered)
+    // and Ferrari ({mesh, steered, baseRotation}) wheel formats.
     const speed = this.speed();
-    const wheelSpin = (this.vel.dot(this.forward()) / 0.4) * dt;   // wheel radius 0.4
+    const wheelSpin = (this.vel.dot(this.forward()) / 0.4) * dt;
     for (const w of this.wheels) {
-      w.rotation.x += wheelSpin;
-      if (w.userData.steered) {
-        w.rotation.y = this.steerInput * 0.6;
+      if (w && w.mesh) {
+        // Ferrari-style descriptor
+        w.mesh.rotation.x = (w.mesh.rotation.x || 0) + wheelSpin;
+        if (w.steered) w.mesh.rotation.y = this.steerInput * 0.6;
+      } else if (w && w.rotation) {
+        // Procedural Group
+        w.rotation.x += wheelSpin;
+        if (w.userData && w.userData.steered) {
+          w.rotation.y = this.steerInput * 0.6;
+        }
       }
     }
 
@@ -336,6 +344,14 @@ function buildCarMesh(color, name) {
   label.position.y = 2.4;
   label.renderOrder = 999;
   root.add(label);
+
+  // Cast shadows on all body parts
+  root.traverse((c) => {
+    if (c.isMesh) {
+      c.castShadow = true;
+      c.receiveShadow = false;
+    }
+  });
 
   root.userData.wheels = wheels;
   root.userData.bodyPivot = bodyPivot;

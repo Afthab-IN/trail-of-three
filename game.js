@@ -3,6 +3,9 @@ import { EffectComposer } from "https://esm.sh/three@0.160.0/examples/jsm/postpr
 import { RenderPass } from "https://esm.sh/three@0.160.0/examples/jsm/postprocessing/RenderPass.js";
 import { UnrealBloomPass } from "https://esm.sh/three@0.160.0/examples/jsm/postprocessing/UnrealBloomPass.js";
 import { OutputPass } from "https://esm.sh/three@0.160.0/examples/jsm/postprocessing/OutputPass.js";
+import { Sky } from "https://esm.sh/three@0.160.0/examples/jsm/objects/Sky.js";
+import { GLTFLoader } from "https://esm.sh/three@0.160.0/examples/jsm/loaders/GLTFLoader.js";
+import { RoomEnvironment } from "https://esm.sh/three@0.160.0/examples/jsm/environments/RoomEnvironment.js";
 
 import { TRACKS, TRACK_WIDTH, buildTrackGeometry, nearestOnTrack, CHECKPOINT_COUNT } from "./track.js";
 import { Car, COLORS } from "./car.js";
@@ -68,18 +71,31 @@ function initScene() {
   state.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
   state.renderer.setSize(window.innerWidth, window.innerHeight);
 
+  // Cinematic tone mapping + shadows
+  state.renderer.toneMapping = THREE.ACESFilmicToneMapping;
+  state.renderer.toneMappingExposure = 1.15;
+  state.renderer.outputColorSpace = THREE.SRGBColorSpace;
+  state.renderer.shadowMap.enabled = true;
+  state.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+
   state.scene = new THREE.Scene();
 
-  state.camera = new THREE.PerspectiveCamera(74, window.innerWidth / window.innerHeight, 0.1, 1200);
+  state.camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.1, 1200);
   state.camera.position.set(0, 8, 14);
   state.camera.lookAt(0, 0, 0);
 
-  // Composer + bloom
+  // Environment map — gives cars subtle reflections
+  const pmrem = new THREE.PMREMGenerator(state.renderer);
+  pmrem.compileEquirectangularShader();
+  state.envMap = pmrem.fromScene(new RoomEnvironment(state.renderer), 0.04).texture;
+  state.scene.environment = state.envMap;
+
+  // Composer + bloom (tuned for ACES)
   state.composer = new EffectComposer(state.renderer);
   state.composer.addPass(new RenderPass(state.scene, state.camera));
   state.bloom = new UnrealBloomPass(
     new THREE.Vector2(window.innerWidth, window.innerHeight),
-    0.6, 0.5, 0.85
+    0.5, 0.6, 0.88
   );
   state.composer.addPass(state.bloom);
   state.composer.addPass(new OutputPass());
@@ -90,7 +106,87 @@ function initScene() {
   // Title cam: orbit a placeholder
   buildPreviewScene();
 
+  // Start loading the Ferrari model in background — used when cars are spawned
+  loadFerrariModel();
+
   window.addEventListener("resize", onResize);
+}
+
+// Try to load a real 3D car model. Falls back to procedural if it fails.
+let ferrariLoaded = false;
+let ferrariTemplate = null;
+function loadFerrariModel() {
+  const loader = new GLTFLoader();
+  const url = "https://threejs.org/examples/models/gltf/ferrari.glb";
+  loader.load(
+    url,
+    (gltf) => {
+      const car = gltf.scene;
+      car.traverse((c) => {
+        if (c.isMesh) {
+          c.castShadow = true;
+          c.receiveShadow = true;
+        }
+      });
+      ferrariTemplate = car;
+      ferrariLoaded = true;
+      // Upgrade existing cars on next frame
+      for (const c of Object.values(state.cars)) {
+        upgradeCarMeshToFerrari(c);
+      }
+      if (state.previewCar) upgradeCarMeshToFerrari(state.previewCar);
+    },
+    undefined,
+    (err) => {
+      console.warn("Ferrari model failed to load, using procedural car", err);
+    }
+  );
+}
+
+function upgradeCarMeshToFerrari(car) {
+  if (!ferrariTemplate || car._ferrariUpgraded) return;
+  car._ferrariUpgraded = true;
+
+  // Remove old procedural mesh children (keep label)
+  const label = car.mesh.userData?.label;
+  const oldBody = car.mesh.userData?.bodyPivot;
+  if (oldBody) car.mesh.remove(oldBody);
+  for (const w of car.mesh.userData?.wheels || []) car.mesh.remove(w);
+
+  const clone = ferrariTemplate.clone(true);
+  clone.scale.setScalar(1.0);
+  // The Ferrari model's body color comes from a "body" material — tint it
+  clone.traverse((c) => {
+    if (!c.isMesh) return;
+    const m = c.material;
+    if (!m) return;
+    if (m.name === "body" || m.name === "Body" || (m.color && m.metalness > 0.5)) {
+      const tinted = m.clone();
+      tinted.color.setHex(car.color);
+      tinted.metalness = 0.85;
+      tinted.roughness = 0.18;
+      tinted.envMapIntensity = 1.0;
+      c.material = tinted;
+    }
+  });
+
+  // Identify wheels by name (Ferrari model uses wheel_fl, wheel_fr, wheel_rl, wheel_rr)
+  const wheels = [];
+  clone.traverse((c) => {
+    if (c.name && /^wheel/i.test(c.name)) {
+      const isFront = /fl|fr/i.test(c.name);
+      wheels.push({ mesh: c, steered: isFront, baseRotation: c.rotation.clone() });
+    }
+  });
+
+  car.mesh.add(clone);
+  car.mesh.userData.body = clone;
+  car.mesh.userData.wheels = wheels;
+  car.wheels = wheels;
+  if (label) {
+    // Keep label
+    label.position.y = 1.8;
+  }
 }
 
 function onResize() {
@@ -131,15 +227,48 @@ function buildPreviewScene() {
 
 function rebuildTheme(theme) {
   clearGroup(state.themeGroup);
-  state.scene.background = new THREE.Color(theme.sky);
+
+  // Real sky shader for daytime tracks. Neon track keeps a solid dark backdrop.
+  if (theme.props !== "neon") {
+    const sky = new Sky();
+    sky.scale.setScalar(2000);
+    const u = sky.material.uniforms;
+    u.turbidity.value = theme.props === "desert" ? 12 : 6;
+    u.rayleigh.value = theme.props === "desert" ? 2 : 2.5;
+    u.mieCoefficient.value = 0.005;
+    u.mieDirectionalG.value = 0.8;
+    // Sun position (elevation/azimuth)
+    const phi = THREE.MathUtils.degToRad(90 - (theme.props === "desert" ? 12 : 45));
+    const theta = THREE.MathUtils.degToRad(theme.props === "desert" ? -150 : 60);
+    const sunVec = new THREE.Vector3().setFromSphericalCoords(1, phi, theta);
+    u.sunPosition.value.copy(sunVec);
+    state.themeGroup.add(sky);
+    state.skySunVec = sunVec;
+    state.scene.background = null; // sky covers it
+  } else {
+    state.scene.background = new THREE.Color(theme.sky);
+  }
+
   state.scene.fog = new THREE.Fog(theme.fogColor, theme.fogNear, theme.fogFar);
 
   const amb = new THREE.HemisphereLight(theme.hemiTop, theme.hemiBot, theme.hemiInt);
   state.themeGroup.add(amb);
 
+  // Directional sun, casts shadows
   const sun = new THREE.DirectionalLight(theme.sunColor, theme.sunInt);
-  sun.position.set(...theme.sunPos);
+  const sp = state.skySunVec ? state.skySunVec.clone().multiplyScalar(220) : new THREE.Vector3(...theme.sunPos);
+  sun.position.copy(sp);
+  sun.castShadow = true;
+  sun.shadow.mapSize.set(2048, 2048);
+  sun.shadow.camera.near = 1;
+  sun.shadow.camera.far = 400;
+  sun.shadow.camera.left = -90;
+  sun.shadow.camera.right = 90;
+  sun.shadow.camera.top = 90;
+  sun.shadow.camera.bottom = -90;
+  sun.shadow.bias = -0.0008;
   state.themeGroup.add(sun);
+  state.sunLight = sun;
 
   state.bloom.strength = theme.bloomStrength;
   state.bloom.threshold = theme.bloomThreshold;
@@ -167,6 +296,7 @@ function buildTrack(trackId) {
   }
   state.trackGroup = new THREE.Group();
   state.scene.add(state.trackGroup);
+  state.swayUniforms = [];
 
   rebuildTheme(track.theme);
   buildGround(track);
@@ -182,6 +312,7 @@ function buildTrack(trackId) {
     metalness: 0.0,
   });
   const road = new THREE.Mesh(data.roadGeo, roadMat);
+  road.receiveShadow = true;
   state.trackGroup.add(road);
 
   // Walls — railing-like, bright
@@ -193,6 +324,8 @@ function buildTrack(trackId) {
     : new THREE.MeshStandardMaterial({ color: 0xeeeeee, roughness: 0.55, metalness: 0.4 });
   const lw = new THREE.Mesh(data.leftWall, wallMat);
   const rw = new THREE.Mesh(data.rightWall, wallMat);
+  lw.castShadow = true; rw.castShadow = true;
+  lw.receiveShadow = true; rw.receiveShadow = true;
   state.trackGroup.add(lw, rw);
 
   // Curb stripes (red/white) on the inside edge — strongly visible
@@ -294,7 +427,8 @@ function buildGround(track) {
   const mat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 1.0 });
   const ground = new THREE.Mesh(geo, mat);
   ground.rotation.x = -Math.PI / 2;
-  ground.position.y = -0.6; // sink below the road so it never pokes through
+  ground.position.y = -0.6;
+  ground.receiveShadow = true;
   state.trackGroup.add(ground);
 }
 
@@ -332,14 +466,36 @@ function placeForestProps(data, theme) {
     const trunkGeo = new THREE.CylinderGeometry(0.35, 0.55, 6 * v.height, 6);
     const trunkMat = new THREE.MeshLambertMaterial({ color: v.trunk });
     const trunkInst = new THREE.InstancedMesh(trunkGeo, trunkMat, list.length);
+    trunkInst.castShadow = true;
+
+    // Sway shader for canopies — injects time-based displacement
+    const swayUniform = { value: 0 };
+    state.swayUniforms = state.swayUniforms || [];
+    state.swayUniforms.push(swayUniform);
+    const canopyMatColor = new THREE.MeshLambertMaterial({ color: v.color });
+    canopyMatColor.onBeforeCompile = (shader) => {
+      shader.uniforms.uTime = swayUniform;
+      shader.vertexShader = shader.vertexShader
+        .replace("#include <common>", "#include <common>\nuniform float uTime;")
+        .replace(
+          "#include <begin_vertex>",
+          `vec3 transformed = vec3(position);
+           // Sway proportional to vertex height (so top sways more)
+           float h = max(0.0, position.y);
+           float t = uTime;
+           transformed.x += sin(t * 1.4 + position.y * 0.5 + position.z) * 0.12 * h;
+           transformed.z += cos(t * 1.1 + position.y * 0.4 + position.x) * 0.10 * h;`
+        );
+    };
 
     // Two-cone canopy for fuller silhouette
     const lowerGeo = new THREE.ConeGeometry(2.6, 4.5 * v.height, 7);
-    const lowerMat = new THREE.MeshLambertMaterial({ color: v.color });
-    const lowerInst = new THREE.InstancedMesh(lowerGeo, lowerMat, list.length);
+    const lowerInst = new THREE.InstancedMesh(lowerGeo, canopyMatColor, list.length);
+    lowerInst.castShadow = true;
 
     const upperGeo = new THREE.ConeGeometry(1.6, 3.5 * v.height, 7);
-    const upperInst = new THREE.InstancedMesh(upperGeo, lowerMat, list.length);
+    const upperInst = new THREE.InstancedMesh(upperGeo, canopyMatColor, list.length);
+    upperInst.castShadow = true;
 
     list.forEach((pp, i) => {
       eul.set(0, pp.r, 0); q.setFromEuler(eul);
@@ -1339,6 +1495,21 @@ function loop() {
   updateChaseCamera(dt);
   applyCameraShake(state.camera, dt);
 
+  // Move shadow-casting sun to follow the player so the visible action is always
+  // inside the shadow camera frustum (which is finite).
+  if (state.sunLight && state.myCar) {
+    const dir = new THREE.Vector3();
+    if (state.skySunVec) dir.copy(state.skySunVec).normalize().multiplyScalar(120);
+    else dir.copy(state.sunLight.position).normalize().multiplyScalar(120);
+    state.sunLight.position.set(
+      state.myCar.pos.x + dir.x,
+      state.myCar.pos.y + dir.y,
+      state.myCar.pos.z + dir.z
+    );
+    state.sunLight.target.position.set(state.myCar.pos.x, state.myCar.pos.y, state.myCar.pos.z);
+    state.sunLight.target.updateMatrixWorld();
+  }
+
   // Network broadcast (10-15 Hz)
   const now = performance.now();
   if (!state.solo && state.myCar && now - state.lastPosBroadcast > 80) {
@@ -1358,6 +1529,12 @@ function loop() {
 
   // FX update
   updateParticles(state.scene, dt);
+
+  // Drive the tree sway uniforms with elapsed time
+  if (state.swayUniforms) {
+    const t = performance.now() * 0.001;
+    for (const u of state.swayUniforms) u.value = t;
+  }
 
   // Render
   state.composer.render(dt);
