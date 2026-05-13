@@ -235,20 +235,22 @@ function rebuildTheme(theme) {
   // Real sky shader for daytime tracks. Neon track keeps a solid dark backdrop.
   if (theme.props !== "neon") {
     const sky = new Sky();
-    sky.scale.setScalar(2000);
+    sky.scale.setScalar(4500);
     const u = sky.material.uniforms;
-    u.turbidity.value = theme.props === "desert" ? 12 : 6;
-    u.rayleigh.value = theme.props === "desert" ? 2 : 2.5;
-    u.mieCoefficient.value = 0.005;
-    u.mieDirectionalG.value = 0.8;
-    // Sun position (elevation/azimuth)
-    const phi = THREE.MathUtils.degToRad(90 - (theme.props === "desert" ? 12 : 45));
-    const theta = THREE.MathUtils.degToRad(theme.props === "desert" ? -150 : 60);
+    u.turbidity.value = theme.props === "desert" ? 8 : 3.0;
+    u.rayleigh.value = theme.props === "desert" ? 1.5 : 1.2;
+    u.mieCoefficient.value = 0.004;
+    u.mieDirectionalG.value = 0.75;
+    // Sun position (high in sky for forest, low for desert)
+    const elev = theme.props === "desert" ? 14 : 55;
+    const azim = theme.props === "desert" ? -135 : 130;
+    const phi = THREE.MathUtils.degToRad(90 - elev);
+    const theta = THREE.MathUtils.degToRad(azim);
     const sunVec = new THREE.Vector3().setFromSphericalCoords(1, phi, theta);
     u.sunPosition.value.copy(sunVec);
     state.themeGroup.add(sky);
     state.skySunVec = sunVec;
-    state.scene.background = null; // sky covers it
+    state.scene.background = null;
   } else {
     state.scene.background = new THREE.Color(theme.sky);
   }

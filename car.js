@@ -224,57 +224,68 @@ export class Car {
 
 function buildCarMesh(color, name) {
   const root = new THREE.Group();
-
-  // bodyPivot wraps everything visual EXCEPT wheels (which are children too, but spin in their own local space)
   const bodyPivot = new THREE.Group();
   root.add(bodyPivot);
 
-  // Chassis (low wedge body)
-  const lower = new THREE.Mesh(
-    new THREE.BoxGeometry(1.8, 0.5, 4.0),
-    new THREE.MeshStandardMaterial({ color, roughness: 0.4, metalness: 0.55 })
-  );
-  lower.position.y = 0.55;
-  bodyPivot.add(lower);
+  // Reusable paint material with high metalness so the env map gives reflections
+  const paintMat = new THREE.MeshStandardMaterial({
+    color, roughness: 0.22, metalness: 0.85, envMapIntensity: 1.5,
+  });
+  const trimMat = new THREE.MeshStandardMaterial({ color: 0x111114, roughness: 0.3, metalness: 0.7 });
+  const glassMat = new THREE.MeshPhysicalMaterial({
+    color: 0x101018, roughness: 0.05, metalness: 0.0, transmission: 0.4,
+    transparent: true, opacity: 0.55, clearcoat: 1.0, clearcoatRoughness: 0.05, ior: 1.5,
+  });
 
-  // Upper cabin (wedge)
-  const cabinShape = new THREE.Shape();
-  cabinShape.moveTo(-0.65, 0);
-  cabinShape.lineTo(0.65, 0);
-  cabinShape.lineTo(0.55, 0.55);
-  cabinShape.lineTo(-0.55, 0.55);
-  cabinShape.lineTo(-0.65, 0);
-  const cabinGeo = new THREE.ExtrudeGeometry(cabinShape, { depth: 1.6, bevelEnabled: false });
-  const cabin = new THREE.Mesh(cabinGeo, new THREE.MeshStandardMaterial({
-    color: 0x1a1a1f, roughness: 0.2, metalness: 0.6, transparent: true, opacity: 0.85,
-  }));
-  cabin.rotation.y = Math.PI / 2;
-  cabin.position.set(0.8, 0.8, 0);
-  bodyPivot.add(cabin);
+  // Sleek body using a Lathe-like profile via ExtrudeGeometry along Z.
+  // Side profile (in XY): low and tapered front, slightly higher rear.
+  const bodyShape = new THREE.Shape();
+  bodyShape.moveTo(-2.1, 0.05);            // back-bottom
+  bodyShape.lineTo( 2.1, 0.05);            // front-bottom
+  bodyShape.quadraticCurveTo(2.3, 0.18, 2.25, 0.42);  // front lip up
+  bodyShape.lineTo( 1.5, 0.55);            // up to hood
+  bodyShape.quadraticCurveTo(0.4, 0.95, -0.4, 0.95);  // roof curve
+  bodyShape.lineTo(-1.6, 0.7);             // back-down
+  bodyShape.lineTo(-2.1, 0.42);            // tail
+  bodyShape.lineTo(-2.1, 0.05);
+  const bodyGeo = new THREE.ExtrudeGeometry(bodyShape, {
+    depth: 1.7, bevelEnabled: true, bevelThickness: 0.08, bevelSize: 0.06, bevelSegments: 3,
+    steps: 4, curveSegments: 12,
+  });
+  bodyGeo.translate(0, 0, -0.85);   // center along Z (which becomes width after rotation)
+  bodyGeo.rotateY(Math.PI / 2);     // align extrude axis with car X (width)
+  const body = new THREE.Mesh(bodyGeo, paintMat);
+  bodyPivot.add(body);
 
-  // Front spoiler (small)
-  const front = new THREE.Mesh(
-    new THREE.BoxGeometry(1.7, 0.15, 0.4),
-    new THREE.MeshStandardMaterial({ color, roughness: 0.5, metalness: 0.4 })
-  );
-  front.position.set(0, 0.35, 1.85);
-  bodyPivot.add(front);
+  // Greenhouse glass — slightly inset on top of the cabin curve
+  const glassShape = new THREE.Shape();
+  glassShape.moveTo(-1.0, 0);
+  glassShape.lineTo( 0.6, 0);
+  glassShape.quadraticCurveTo( 0.3, 0.32, -0.4, 0.32);
+  glassShape.lineTo(-1.0, 0);
+  const glassGeo = new THREE.ExtrudeGeometry(glassShape, {
+    depth: 1.55, bevelEnabled: false, curveSegments: 8,
+  });
+  glassGeo.translate(0, 0, -0.775);
+  glassGeo.rotateY(Math.PI / 2);
+  const glass = new THREE.Mesh(glassGeo, glassMat);
+  glass.position.y = 0.66;
+  bodyPivot.add(glass);
 
   // Rear wing
   const wing = new THREE.Mesh(
-    new THREE.BoxGeometry(1.9, 0.06, 0.35),
-    new THREE.MeshStandardMaterial({ color: 0x202020, metalness: 0.4 })
+    new THREE.BoxGeometry(1.85, 0.07, 0.45),
+    trimMat
   );
-  wing.position.set(0, 0.95, -1.9);
+  wing.position.set(0, 0.95, -1.95);
   bodyPivot.add(wing);
-  // wing supports
-  for (const x of [-0.7, 0.7]) {
-    const s = new THREE.Mesh(
-      new THREE.BoxGeometry(0.08, 0.25, 0.08),
-      new THREE.MeshStandardMaterial({ color: 0x202020 })
+  for (const x of [-0.78, 0.78]) {
+    const sup = new THREE.Mesh(
+      new THREE.BoxGeometry(0.1, 0.22, 0.1),
+      trimMat
     );
-    s.position.set(x, 0.82, -1.9);
-    bodyPivot.add(s);
+    sup.position.set(x, 0.83, -1.95);
+    bodyPivot.add(sup);
   }
 
   // Headlights (emissive)
@@ -299,24 +310,45 @@ function buildCarMesh(color, name) {
     tailLights.push(tlMat);
   }
 
-  // Wheels
-  const wheelGeo = new THREE.CylinderGeometry(0.4, 0.4, 0.35, 14);
-  wheelGeo.rotateZ(Math.PI / 2);
-  const wheelMat = new THREE.MeshStandardMaterial({ color: 0x101010, roughness: 0.9 });
+  // Wheels — tire + visible rim (silver hub) for proper detail
+  const tireGeo = new THREE.CylinderGeometry(0.42, 0.42, 0.32, 20);
+  tireGeo.rotateZ(Math.PI / 2);
+  const tireMat = new THREE.MeshStandardMaterial({ color: 0x0a0a0c, roughness: 0.9, metalness: 0.0 });
+
+  const rimGeo = new THREE.CylinderGeometry(0.28, 0.28, 0.34, 14);
+  rimGeo.rotateZ(Math.PI / 2);
+  const rimMat = new THREE.MeshStandardMaterial({
+    color: 0xb8b8c0, roughness: 0.25, metalness: 0.9, envMapIntensity: 1.4,
+  });
+
+  // 5-spoke pattern via thin boxes spanning the rim diameter
+  function makeWheel() {
+    const grp = new THREE.Group();
+    const tire = new THREE.Mesh(tireGeo, tireMat);
+    grp.add(tire);
+    const rim = new THREE.Mesh(rimGeo, rimMat);
+    grp.add(rim);
+    const spokeMat = new THREE.MeshStandardMaterial({ color: 0xd0d0d8, metalness: 0.85, roughness: 0.25 });
+    for (let i = 0; i < 5; i++) {
+      const spoke = new THREE.Mesh(new THREE.BoxGeometry(0.36, 0.05, 0.08), spokeMat);
+      spoke.rotation.x = (i / 5) * Math.PI * 2;
+      spoke.position.x = 0;
+      grp.add(spoke);
+    }
+    return grp;
+  }
+
   const wheels = [];
   const positions = [
-    [-0.95, 0.4,  1.35, true],
-    [ 0.95, 0.4,  1.35, true],
-    [-0.95, 0.4, -1.35, false],
-    [ 0.95, 0.4, -1.35, false],
+    [-0.95, 0.42,  1.30, true],
+    [ 0.95, 0.42,  1.30, true],
+    [-0.95, 0.42, -1.30, false],
+    [ 0.95, 0.42, -1.30, false],
   ];
   for (const [x, y, z, steered] of positions) {
-    // Wrap the wheel in a group so we can rotate Y (steer) on the group and X (spin) on child
-    const grp = new THREE.Group();
+    const grp = makeWheel();
     grp.position.set(x, y, z);
     grp.userData.steered = steered;
-    const w = new THREE.Mesh(wheelGeo, wheelMat);
-    grp.add(w);
     root.add(grp);
     wheels.push(grp);
   }
