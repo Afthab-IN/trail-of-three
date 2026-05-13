@@ -168,29 +168,56 @@ function buildTrack(trackId) {
   const data = buildTrackGeometry(track);
   state.trackData = data;
 
-  // Road
-  const roadMat = track.id === "neon"
-    ? new THREE.MeshStandardMaterial({ color: 0x080812, roughness: 0.4, metalness: 0.3 })
-    : new THREE.MeshStandardMaterial({ color: 0x1a1820, roughness: 0.9, metalness: 0.0 });
+  // Road — much brighter so it actually reads as asphalt
+  const roadColor = track.id === "neon" ? 0x18181f : 0x4a4a52;
+  const roadMat = new THREE.MeshStandardMaterial({
+    color: roadColor,
+    roughness: 0.85,
+    metalness: 0.0,
+  });
   const road = new THREE.Mesh(data.roadGeo, roadMat);
   state.trackGroup.add(road);
 
-  // Walls
+  // Walls — railing-like, bright
   const wallMat = track.theme.wallEmissive
     ? new THREE.MeshStandardMaterial({
         color: track.theme.wallEmissive, emissive: track.theme.wallEmissive,
         emissiveIntensity: 1.6,
       })
-    : new THREE.MeshStandardMaterial({ color: 0xd0d0d0, roughness: 0.6, metalness: 0.3 });
+    : new THREE.MeshStandardMaterial({ color: 0xeeeeee, roughness: 0.55, metalness: 0.4 });
   const lw = new THREE.Mesh(data.leftWall, wallMat);
   const rw = new THREE.Mesh(data.rightWall, wallMat);
   state.trackGroup.add(lw, rw);
 
-  // Center line dashes (decorative)
-  const dashMat = new THREE.MeshBasicMaterial({ color: 0xffffaa });
-  for (let i = 0; i < data.samples.length; i += 10) {
+  // Curb stripes (red/white) on the inside edge — strongly visible
+  const curbRedMat = new THREE.MeshBasicMaterial({ color: 0xe83040 });
+  const curbWhiteMat = new THREE.MeshBasicMaterial({ color: 0xffffff });
+  const curbLeft = new THREE.Group();
+  const curbRight = new THREE.Group();
+  for (let i = 0; i < data.samples.length; i += 4) {
     const s = data.samples[i];
-    const dash = new THREE.Mesh(new THREE.PlaneGeometry(0.25, 1.6), dashMat);
+    const mat = (i / 4) % 2 === 0 ? curbRedMat : curbWhiteMat;
+    const curbW = 0.6;
+    const baseL = s.p.clone().addScaledVector(s.right, -(TRACK_WIDTH / 2) + curbW / 2);
+    const baseR = s.p.clone().addScaledVector(s.right,  (TRACK_WIDTH / 2) - curbW / 2);
+    const cl = new THREE.Mesh(new THREE.PlaneGeometry(curbW, 1.4), mat);
+    cl.position.set(baseL.x, baseL.y + 0.07, baseL.z);
+    cl.rotation.x = -Math.PI / 2;
+    cl.rotation.z = -Math.atan2(s.tan.x, s.tan.z);
+    curbLeft.add(cl);
+    const cr = new THREE.Mesh(new THREE.PlaneGeometry(curbW, 1.4), mat);
+    cr.position.set(baseR.x, baseR.y + 0.07, baseR.z);
+    cr.rotation.x = -Math.PI / 2;
+    cr.rotation.z = -Math.atan2(s.tan.x, s.tan.z);
+    curbRight.add(cr);
+  }
+  state.trackGroup.add(curbLeft, curbRight);
+
+  // Center line dashes (brighter, more frequent)
+  const dashMat = new THREE.MeshBasicMaterial({ color: 0xffff80 });
+  for (let i = 0; i < data.samples.length; i += 6) {
+    const s = data.samples[i];
+    const dash = new THREE.Mesh(new THREE.PlaneGeometry(0.35, 2.4), dashMat);
     dash.position.set(s.p.x, s.p.y + 0.08, s.p.z);
     dash.rotation.x = -Math.PI / 2;
     dash.rotation.z = -Math.atan2(s.tan.x, s.tan.z);
@@ -253,38 +280,113 @@ function buildGround(track) {
 }
 
 function placeForestProps(data, theme) {
-  // Instanced trees scattered outside the track
-  const positions = [];
   const rng = seededRng(0x42);
-  for (let i = 0; i < 600; i++) {
-    const x = (rng() - 0.5) * 1200;
-    const z = (rng() - 0.5) * 1200;
-    // skip if too close to track
+
+  // Three tree variants: tall pine, wide pine, dark fir
+  const variants = [
+    { color: 0x1f3a16, trunk: 0x2a1a10, height: 1.0 },
+    { color: 0x2a4a20, trunk: 0x3a2515, height: 1.4 },
+    { color: 0x183010, trunk: 0x251510, height: 0.8 },
+  ];
+  const byVariant = variants.map(() => []);
+
+  for (let i = 0; i < 1100; i++) {
+    const x = (rng() - 0.5) * 1300;
+    const z = (rng() - 0.5) * 1300;
     const near = nearestOnTrack(data.samples, x, z);
-    if (near.dist < 16) continue;
-    positions.push({ x, z, s: 0.8 + rng() * 0.8, r: rng() * Math.PI * 2 });
+    // Allow trees right up to 7m from the road for that "racing through forest" feel
+    if (near.dist < 7) continue;
+    if (near.dist > 350) continue; // skip extreme outliers (we render rest as silhouettes)
+    const v = Math.floor(rng() * 3);
+    byVariant[v].push({ x, z, s: 0.7 + rng() * 0.9, r: rng() * Math.PI * 2 });
   }
-  const trunkGeo = new THREE.CylinderGeometry(0.4, 0.55, 6, 6);
-  const trunkMat = new THREE.MeshLambertMaterial({ color: theme.trunkColor });
-  const trunkInst = new THREE.InstancedMesh(trunkGeo, trunkMat, positions.length);
-  const canopyGeo = new THREE.ConeGeometry(2.6, 6, 6);
-  const canopyMat = new THREE.MeshLambertMaterial({ color: theme.treeColor });
-  const canopyInst = new THREE.InstancedMesh(canopyGeo, canopyMat, positions.length);
+
   const m = new THREE.Matrix4();
   const q = new THREE.Quaternion();
   const eul = new THREE.Euler();
   const sc = new THREE.Vector3();
   const p = new THREE.Vector3();
-  positions.forEach((pp, i) => {
-    eul.set(0, pp.r, 0); q.setFromEuler(eul);
-    p.set(pp.x, 3 * pp.s, pp.z); sc.set(pp.s, pp.s, pp.s);
-    m.compose(p, q, sc); trunkInst.setMatrixAt(i, m);
-    p.set(pp.x, 6 * pp.s + 0.6, pp.z);
-    m.compose(p, q, sc); canopyInst.setMatrixAt(i, m);
+
+  variants.forEach((v, vi) => {
+    const list = byVariant[vi];
+    if (list.length === 0) return;
+    const trunkGeo = new THREE.CylinderGeometry(0.35, 0.55, 6 * v.height, 6);
+    const trunkMat = new THREE.MeshLambertMaterial({ color: v.trunk });
+    const trunkInst = new THREE.InstancedMesh(trunkGeo, trunkMat, list.length);
+
+    // Two-cone canopy for fuller silhouette
+    const lowerGeo = new THREE.ConeGeometry(2.6, 4.5 * v.height, 7);
+    const lowerMat = new THREE.MeshLambertMaterial({ color: v.color });
+    const lowerInst = new THREE.InstancedMesh(lowerGeo, lowerMat, list.length);
+
+    const upperGeo = new THREE.ConeGeometry(1.6, 3.5 * v.height, 7);
+    const upperInst = new THREE.InstancedMesh(upperGeo, lowerMat, list.length);
+
+    list.forEach((pp, i) => {
+      eul.set(0, pp.r, 0); q.setFromEuler(eul);
+      sc.set(pp.s, pp.s, pp.s);
+
+      p.set(pp.x, 3 * v.height * pp.s, pp.z);
+      m.compose(p, q, sc); trunkInst.setMatrixAt(i, m);
+
+      p.set(pp.x, (6 * v.height + 2.25 * v.height) * pp.s - 0.3, pp.z);
+      m.compose(p, q, sc); lowerInst.setMatrixAt(i, m);
+
+      p.set(pp.x, (6 * v.height + 5 * v.height) * pp.s, pp.z);
+      m.compose(p, q, sc); upperInst.setMatrixAt(i, m);
+    });
+
+    trunkInst.instanceMatrix.needsUpdate = true;
+    lowerInst.instanceMatrix.needsUpdate = true;
+    upperInst.instanceMatrix.needsUpdate = true;
+    state.trackGroup.add(trunkInst, lowerInst, upperInst);
   });
-  trunkInst.instanceMatrix.needsUpdate = true;
-  canopyInst.instanceMatrix.needsUpdate = true;
-  state.trackGroup.add(trunkInst); state.trackGroup.add(canopyInst);
+
+  // Grass tufts scattered close to the road for foreground interest
+  const tuftGeo = new THREE.ConeGeometry(0.18, 0.55, 4);
+  const tuftMat = new THREE.MeshLambertMaterial({ color: 0x4a6a3a });
+  const tufts = [];
+  for (let i = 0; i < 500; i++) {
+    const x = (rng() - 0.5) * 800;
+    const z = (rng() - 0.5) * 800;
+    const near = nearestOnTrack(data.samples, x, z);
+    if (near.dist < 6 || near.dist > 40) continue;
+    tufts.push({ x, z, r: rng() * Math.PI * 2 });
+  }
+  if (tufts.length > 0) {
+    const tuftInst = new THREE.InstancedMesh(tuftGeo, tuftMat, tufts.length);
+    tufts.forEach((t, i) => {
+      eul.set(0, t.r, 0); q.setFromEuler(eul);
+      p.set(t.x, 0.25, t.z); sc.set(1, 1, 1);
+      m.compose(p, q, sc); tuftInst.setMatrixAt(i, m);
+    });
+    tuftInst.instanceMatrix.needsUpdate = true;
+    state.trackGroup.add(tuftInst);
+  }
+
+  // Wildflowers (small bright cubes) for spots of color
+  const flowerColors = [0xff8060, 0xffd060, 0xe080f0];
+  flowerColors.forEach((col, ci) => {
+    const fg = new THREE.BoxGeometry(0.18, 0.18, 0.18);
+    const fm = new THREE.MeshLambertMaterial({ color: col });
+    const flowers = [];
+    for (let i = 0; i < 200; i++) {
+      const x = (rng() - 0.5) * 600;
+      const z = (rng() - 0.5) * 600;
+      const near = nearestOnTrack(data.samples, x, z);
+      if (near.dist < 7 || near.dist > 24) continue;
+      flowers.push({ x, z });
+    }
+    if (flowers.length === 0) return;
+    const finst = new THREE.InstancedMesh(fg, fm, flowers.length);
+    flowers.forEach((f, i) => {
+      eul.set(0, 0, 0); q.setFromEuler(eul);
+      p.set(f.x, 0.15, f.z); sc.set(1, 1, 1);
+      m.compose(p, q, sc); finst.setMatrixAt(i, m);
+    });
+    finst.instanceMatrix.needsUpdate = true;
+    state.trackGroup.add(finst);
+  });
 }
 
 function placeDesertProps(data, theme) {
@@ -548,12 +650,14 @@ function updateChaseCamera(dt) {
   state.camera.updateProjectionMatrix();
 
   if (state.cameraMode === 0) {
-    // Chase camera — behind & above
+    // Chase camera — behind & higher up, looking down at the road ahead
     const back = new THREE.Vector3(Math.sin(car.heading), 0, Math.cos(car.heading));
-    const camOffset = back.clone().multiplyScalar(-9);
-    const target = new THREE.Vector3(car.pos.x + camOffset.x, car.pos.y + 4.0, car.pos.z + camOffset.z);
-    state.camera.position.lerp(target, Math.min(1, dt * 6));
-    state.camera.lookAt(car.pos.x, car.pos.y + 1.2, car.pos.z);
+    const camOffset = back.clone().multiplyScalar(-8.5);
+    const target = new THREE.Vector3(car.pos.x + camOffset.x, car.pos.y + 5.8, car.pos.z + camOffset.z);
+    state.camera.position.lerp(target, Math.min(1, dt * 8));
+    // Look at a point slightly ahead of the car (along its forward direction)
+    const ahead = back.clone().multiplyScalar(8);
+    state.camera.lookAt(car.pos.x + ahead.x, car.pos.y + 0.8, car.pos.z + ahead.z);
   } else if (state.cameraMode === 1) {
     // Cockpit
     const fwd = new THREE.Vector3(Math.sin(car.heading), 0, Math.cos(car.heading));

@@ -182,10 +182,23 @@ export class Car {
     this.bodyPivot.rotation.z += (targetRoll - this.bodyPivot.rotation.z) * Math.min(1, dt * 8);
     this.bodyPivot.rotation.x += (targetPitch - this.bodyPivot.rotation.x) * Math.min(1, dt * 8);
 
-    // Boost light
+    // Boost light + visible flame
     if (this.boostLight) {
       this.boostLight.intensity = this.boostActive ? 3.2 : 0;
       this.boostLight.visible = this.boostActive;
+    }
+    const flame = this.mesh.userData?.flame;
+    if (flame) {
+      flame.visible = this.boostActive;
+      if (this.boostActive) {
+        flame.scale.set(0.9 + Math.random() * 0.3, 1.0 + Math.random() * 0.5, 0.9 + Math.random() * 0.3);
+      }
+    }
+    // Brake lights brighten when braking or coasting backwards
+    const tls = this.mesh.userData?.tailLights;
+    if (tls) {
+      const t = this.brake > 0.1 ? 2.6 : (this.throttle > 0 ? 0.6 : 1.4);
+      for (const m of tls) m.emissiveIntensity = t;
     }
   }
 
@@ -265,14 +278,17 @@ function buildCarMesh(color, name) {
     hl.position.set(x, 0.55, 1.95);
     bodyPivot.add(hl);
   }
-  // Tail lights
+  // Tail lights — referenced so they can brighten when braking
+  const tailLights = [];
   for (const x of [-0.7, 0.7]) {
+    const tlMat = new THREE.MeshStandardMaterial({ color: 0xff3030, emissive: 0xff2020, emissiveIntensity: 0.6 });
     const tl = new THREE.Mesh(
       new THREE.BoxGeometry(0.25, 0.12, 0.05),
-      new THREE.MeshStandardMaterial({ color: 0xff3030, emissive: 0xff2020, emissiveIntensity: 1.0 })
+      tlMat
     );
     tl.position.set(x, 0.55, -1.98);
     bodyPivot.add(tl);
+    tailLights.push(tlMat);
   }
 
   // Wheels
@@ -326,6 +342,7 @@ function buildCarMesh(color, name) {
   root.userData.boostLight = boostLight;
   root.userData.flame = flame;
   root.userData.label = label;
+  root.userData.tailLights = tailLights;
   return root;
 }
 
