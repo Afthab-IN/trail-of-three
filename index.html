@@ -3,54 +3,102 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>The Lantern Path</title>
+  <title>The Shattered Vale</title>
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
-  <!-- Three.js renders into this -->
   <canvas id="scene"></canvas>
 
-  <!-- Title / start screen -->
-  <section id="screen-start" class="overlay centered">
+  <!-- Start screen -->
+  <section id="screen-start" class="overlay">
     <div class="title-block">
-      <h1>The Lantern Path</h1>
-      <p class="tagline">A story takes you through the wood. You decide who walks out.</p>
-      <button id="begin-btn">Begin</button>
+      <h1>The Shattered Vale</h1>
+      <p class="tagline">A valley remembers its dragon. Wake it. End it.</p>
+
+      <div class="card">
+        <label for="name">Your name</label>
+        <input id="name" maxlength="20" placeholder="Wanderer" />
+      </div>
+
+      <div class="row">
+        <button id="solo-btn">Solo (you alone)</button>
+        <button id="host-btn" class="ghost">Host a co-op vale</button>
+      </div>
+
+      <div class="or-divider">— or join —</div>
+      <div class="row">
+        <input id="room-code-input" maxlength="6" placeholder="ROOM CODE" style="text-transform:uppercase;letter-spacing:0.3em;text-align:center;" />
+        <button id="join-btn" class="ghost">Join</button>
+      </div>
+
       <div class="hint">
-        <strong>WASD</strong> walk &nbsp;·&nbsp; <strong>Mouse</strong> look &nbsp;·&nbsp; <strong>E</strong> interact &nbsp;·&nbsp; <strong>ESC</strong> release mouse
+        <strong>WASD</strong> walk &nbsp;·&nbsp; <strong>Shift</strong> sprint &nbsp;·&nbsp; <strong>Space</strong> jump &nbsp;·&nbsp;
+        <strong>Mouse</strong> look &nbsp;·&nbsp; <strong>Click</strong> swing sword &nbsp;·&nbsp; <strong>ESC</strong> release mouse
       </div>
     </div>
   </section>
 
-  <!-- HUD shown while walking -->
-  <div id="hud">
-    <div id="interact-prompt" class="hidden">
-      <kbd>E</kbd> <span>Speak</span>
+  <!-- Lobby (waiting for players) -->
+  <section id="screen-lobby" class="overlay hidden">
+    <div class="title-block">
+      <h2>The Vale Awaits</h2>
+      <div class="card">
+        <label>Share this room code with up to 2 companions</label>
+        <div class="room-code" id="room-code-display"></div>
+      </div>
+      <div class="card">
+        <div id="lobby-players" class="lobby-list"></div>
+      </div>
+      <button id="enter-btn">Enter the Vale</button>
+      <p class="muted-small" id="lobby-hint" style="margin-top:12px;">You can enter alone or wait for friends. They can join the running game at any time.</p>
+      <p class="muted-small hidden" id="lobby-hint-join" style="margin-top:12px;font-style:italic;">Waiting for the host to begin…</p>
     </div>
-    <div id="lantern-icon">✦</div>
+  </section>
+
+  <!-- HUD -->
+  <div id="hud" class="hidden">
+    <div id="vitals">
+      <div class="vital-row">
+        <div class="vital-label">HP</div>
+        <div class="vital-bar"><div id="hp-fill"></div></div>
+        <div class="vital-num" id="hp-num">100/100</div>
+      </div>
+      <div class="vital-row gold">
+        <div class="vital-label">★</div>
+        <div class="vital-num" id="gold-num">0</div>
+      </div>
+    </div>
+
+    <div id="objective">
+      <div class="obj-title">Objective</div>
+      <div id="obj-text">Find the dragon on the eastern peak.</div>
+      <div class="obj-distance" id="obj-distance">— —</div>
+    </div>
+
+    <div id="player-list"></div>
+
+    <div id="crosshair">·</div>
+    <div id="interact-prompt" class="hidden"><kbd>E</kbd> <span id="interact-text">Interact</span></div>
+
+    <div id="boss-bar" class="hidden">
+      <div class="boss-name">The Pale Dragon</div>
+      <div class="boss-hp"><div id="boss-hp-fill"></div></div>
+    </div>
+
+    <div id="event-log"></div>
   </div>
 
-  <!-- Dialogue overlay -->
-  <section id="dialogue" class="hidden">
-    <div class="dialogue-box">
-      <div class="speaker" id="dialogue-speaker"></div>
-      <div class="text" id="dialogue-text"></div>
-      <div class="choices" id="dialogue-choices"></div>
-      <div class="footer">
-        <button id="continue-btn" class="ghost hidden">Continue ↵</button>
-        <span class="muted-small" id="dialogue-hint">Click to skip</span>
-      </div>
-    </div>
-  </section>
-
-  <!-- Ending screen -->
-  <section id="screen-ending" class="overlay centered hidden">
-    <div class="title-block ending">
-      <h2 id="ending-title"></h2>
-      <div id="ending-text" class="ending-text"></div>
+  <!-- End screen -->
+  <section id="screen-end" class="overlay hidden">
+    <div class="title-block">
+      <h2 id="end-title">The Vale Is Yours</h2>
+      <div id="end-stats" class="end-stats"></div>
       <button id="restart-btn">Walk it again</button>
     </div>
   </section>
+
+  <!-- Banner -->
+  <div id="banner" class="hidden"></div>
 
   <script type="module" src="game.js"></script>
 </body>
