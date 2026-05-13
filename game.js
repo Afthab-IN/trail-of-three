@@ -267,21 +267,34 @@ function buildTrack(trackId) {
 function buildGround(track) {
   const SIZE = 1400;
   const geo = new THREE.PlaneGeometry(SIZE, SIZE, 80, 80);
-  // Slight noise based on theme
+  // Subtle far-field rolling — kept SMALL so it never rises above the road surface.
+  // The road sits at y≈0.05; if terrain bumps poke above that, they bury the car.
   const pos = geo.attributes.position;
-  const bumpScale = track.theme.groundBumpScale ?? 1.5;
+  const bumpAmp = (track.theme.groundBumpScale ?? 1.5) * 0.15; // attenuate to safe range
   for (let i = 0; i < pos.count; i++) {
     const x = pos.getX(i);
     const y = pos.getY(i);
-    let h = Math.sin(x * 0.012) * bumpScale + Math.cos(y * 0.014) * bumpScale;
-    h += Math.sin((x + y) * 0.03) * bumpScale * 0.5;
+    // Strongly suppress bumps near the track centerline
+    const distFromCenter = Math.sqrt(x * x + y * y);
+    const farMask = Math.min(1, Math.max(0, (distFromCenter - 40) / 200));
+    let h = Math.sin(x * 0.012) * bumpAmp + Math.cos(y * 0.014) * bumpAmp;
+    h += Math.sin((x + y) * 0.03) * bumpAmp * 0.5;
+    h *= farMask;
     pos.setZ(i, h);
   }
   geo.computeVertexNormals();
-  const mat = new THREE.MeshStandardMaterial({ color: track.theme.ground, roughness: 1.0 });
+  // Add subtle vertex colors for a less monotone ground
+  const colors = [];
+  for (let i = 0; i < pos.count; i++) {
+    const base = new THREE.Color(track.theme.ground);
+    const jitter = (i * 9301 + 49297) % 233 / 233 * 0.12 - 0.06;
+    colors.push(base.r + jitter, base.g + jitter * 0.7, base.b + jitter * 0.4);
+  }
+  geo.setAttribute("color", new THREE.Float32BufferAttribute(colors, 3));
+  const mat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 1.0 });
   const ground = new THREE.Mesh(geo, mat);
   ground.rotation.x = -Math.PI / 2;
-  ground.position.y = -0.2;
+  ground.position.y = -0.6; // sink below the road so it never pokes through
   state.trackGroup.add(ground);
 }
 
