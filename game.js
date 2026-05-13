@@ -1,14 +1,13 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { SUPABASE_URL, SUPABASE_ANON_KEY } from "./config.js";
-import { STAGES } from "./stages.js";
+import { generateWorld, isWalkable, manhattan, TILE_PX, WORLD_W, WORLD_H } from "./world.js";
 
 const ROLES = {
-  scout:   { name: "Scout",   glyph: "◈", desc: "Sees ahead. Avoids danger." },
-  brawler: { name: "Brawler", glyph: "✦", desc: "Stands ground. Hits hard." },
-  mystic:  { name: "Mystic",  glyph: "✧", desc: "Bends fate. Reads signs." },
+  scout:   { name: "Scout",   glyph: "◈", color: "#6ec79b", desc: "Quick on their feet. Moves twice per tick.", maxHp: 25, dmg: 3, moveMs: 110 },
+  brawler: { name: "Brawler", glyph: "✦", color: "#d97455", desc: "Tough and heavy-handed. Hits twice as hard.", maxHp: 45, dmg: 6, moveMs: 220 },
+  mystic:  { name: "Mystic",  glyph: "✧", color: "#9b7ed4", desc: "Channels light. Press E to heal nearby allies.", maxHp: 28, dmg: 3, moveMs: 170 },
 };
 
-// --- State ---
 const state = {
   supabase: null,
   channel: null,
@@ -17,39 +16,44 @@ const state = {
   myName: "",
   myRole: null,
   isHost: false,
-  players: {},          // { id: { name, role, gold, lockedIn, choice } }
-  phase: "lobby",       // lobby | role | playing | outcome | done
-  stageIndex: 0,
-  currentChoices: {},   // { role: optionId } — set when player locks in
-  lastOutcome: null,
+  phase: "home",
+  players: {},     // id -> { name, role, x, y, hp, maxHp, gold, alive }
+  world: null,     // { W, H, tiles, spawns }
+  entities: {},    // id -> entity
+  lastMoveAt: 0,
+  lastAbilityAt: 0,
+  pressed: {},
 };
 
-// --- DOM helpers ---
-const $ = (sel) => document.querySelector(sel);
-const $$ = (sel) => document.querySelectorAll(sel);
+const $ = (s) => document.querySelector(s);
+
 function show(id) { $(id).classList.remove("hidden"); }
 function hide(id) { $(id).classList.add("hidden"); }
-function setText(sel, txt) { $(sel).textContent = txt; }
+function setText(s, t) { $(s).textContent = t; }
+
+function banner(msg, kind = "info") {
+  const b = $("#banner");
+  b.textContent = msg;
+  b.className = "banner" + (kind === "info" ? " info" : "");
+  b.classList.remove("hidden");
+  clearTimeout(banner._t);
+  banner._t = setTimeout(() => b.classList.add("hidden"), 4000);
+}
+
+function escapeHTML(s) {
+  return String(s).replace(/[&<>"']/g, c => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[c]));
+}
 
 // --- Supabase init ---
 function initSupabase() {
   if (SUPABASE_URL.includes("PASTE_") || SUPABASE_ANON_KEY.includes("PASTE_")) {
-    showBanner("Edit config.js with your Supabase URL and anon key first.", "error");
+    banner("Edit config.js with your Supabase URL and anon key.", "error");
     return false;
   }
   state.supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
   return true;
 }
 
-function showBanner(msg, kind = "info") {
-  const b = $("#banner");
-  b.textContent = msg;
-  b.className = "banner" + (kind === "info" ? " info" : "");
-  b.classList.remove("hidden");
-  setTimeout(() => b.classList.add("hidden"), 5000);
-}
-
-// --- Room code ---
 function makeRoomCode() {
   const chars = "ABCDEFGHJKMNPQRSTVWXYZ23456789";
   let c = "";
@@ -57,433 +61,597 @@ function makeRoomCode() {
   return c;
 }
 
-// --- Join / Host ---
-async function hostRoom() {
-  const name = $("#name").value.trim();
-  if (!name) return showBanner("Enter your name first.");
-  if (!initSupabase()) return;
-  state.myName = name;
-  state.roomCode = makeRoomCode();
-  state.isHost = true;
-  await connectChannel();
-  goToRolePick();
-}
-
-async function joinRoom() {
-  const name = $("#name").value.trim();
-  const code = $("#room-code-input").value.trim().toUpperCase();
-  if (!name) return showBanner("Enter your name first.");
-  if (!code || code.length !== 6) return showBanner("Enter a 6-char room code.");
-  if (!initSupabase()) return;
-  state.myName = name;
-  state.roomCode = code;
-  state.isHost = false;
-  await connectChannel();
-  goToRolePick();
-}
-
+// --- Networking ---
 async function connectChannel() {
   const channel = state.supabase.channel(`trail:${state.roomCode}`, {
     config: { broadcast: { self: true }, presence: { key: state.myId } },
   });
 
-  channel.on("broadcast", { event: "msg" }, ({ payload }) => handleMessage(payload));
-
+  channel.on("broadcast", { event: "msg" }, ({ payload }) => handle(payload));
   channel.on("presence", { event: "sync" }, () => {
-    const presenceState = channel.presenceState();
-    // Clean up players who left
-    const presentIds = new Set();
-    for (const ids of Object.values(presenceState)) {
-      for (const p of ids) presentIds.add(p.id);
-    }
+    const ps = channel.presenceState();
+    const present = new Set();
+    for (const arr of Object.values(ps)) for (const p of arr) present.add(p.id);
     let changed = false;
     for (const id of Object.keys(state.players)) {
-      if (!presentIds.has(id)) { delete state.players[id]; changed = true; }
+      if (!present.has(id)) { delete state.players[id]; changed = true; }
     }
-    if (changed) renderAll();
+    if (changed) renderHud();
   });
 
-  await new Promise((resolve) => {
+  await new Promise((res) => {
     channel.subscribe(async (status) => {
       if (status === "SUBSCRIBED") {
         await channel.track({ id: state.myId, name: state.myName });
-        resolve();
+        res();
       }
     });
   });
-
   state.channel = channel;
 
-  // Announce self
   send({ type: "hello", id: state.myId, name: state.myName });
-  // Ask anyone for current state (so late joiners can catch up)
-  send({ type: "request-state", id: state.myId });
+  send({ type: "req-state", id: state.myId });
 }
 
 function send(payload) {
   state.channel.send({ type: "broadcast", event: "msg", payload });
 }
 
-// --- Message handling ---
-function handleMessage(msg) {
-  if (msg.from && msg.from === state.myId) {
-    // Ignore my own broadcasts that loop back, EXCEPT for outcomes I authored as host
-    // (we set self:true so host can render its own outcome too — handled below)
-  }
-
-  switch (msg.type) {
-    case "hello": {
-      if (!state.players[msg.id]) {
-        state.players[msg.id] = { name: msg.name, role: null, gold: 0, lockedIn: false, choice: null };
-      } else {
-        state.players[msg.id].name = msg.name;
-      }
-      renderAll();
-      // If we are host, send current state to the newcomer
-      if (state.isHost && msg.id !== state.myId) {
-        send({
-          type: "state-snapshot",
-          to: msg.id,
-          players: state.players,
-          phase: state.phase,
-          stageIndex: state.stageIndex,
-          currentChoices: state.currentChoices,
-        });
-      }
-      break;
-    }
-    case "request-state": {
-      if (state.isHost && msg.id !== state.myId) {
-        send({
-          type: "state-snapshot",
-          to: msg.id,
-          players: state.players,
-          phase: state.phase,
-          stageIndex: state.stageIndex,
-          currentChoices: state.currentChoices,
-        });
-      }
-      break;
-    }
-    case "state-snapshot": {
-      if (msg.to !== state.myId) return;
-      // Merge in players we don't know about
-      for (const [id, p] of Object.entries(msg.players)) {
-        state.players[id] = { ...state.players[id], ...p };
-      }
-      state.phase = msg.phase;
-      state.stageIndex = msg.stageIndex;
-      state.currentChoices = msg.currentChoices || {};
-      renderAll();
-      if (state.phase === "playing") renderStage();
-      break;
-    }
-    case "role-pick": {
-      if (!state.players[msg.id]) state.players[msg.id] = { name: msg.name, gold: 0, lockedIn: false };
-      state.players[msg.id].role = msg.role;
-      state.players[msg.id].name = msg.name;
-      renderAll();
-      break;
-    }
-    case "start-game": {
-      state.phase = "playing";
-      state.stageIndex = 0;
-      state.currentChoices = {};
-      for (const p of Object.values(state.players)) { p.lockedIn = false; p.choice = null; }
-      renderAll();
-      renderStage();
-      break;
-    }
-    case "lock-choice": {
-      if (state.players[msg.id]) {
-        state.players[msg.id].lockedIn = true;
-        state.players[msg.id].choice = msg.choice;
-      }
-      if (msg.role) state.currentChoices[msg.role] = msg.choice;
-      renderAll();
-
-      // Host: check if all roles have locked in
-      if (state.isHost) {
-        const filledRoles = Object.values(state.players).filter(p => p.role).map(p => p.role);
-        const allLocked = filledRoles.every(r => state.currentChoices[r]);
-        if (filledRoles.length === 3 && allLocked) {
-          resolveStage();
-        }
-      }
-      break;
-    }
-    case "outcome": {
-      state.phase = "outcome";
-      state.lastOutcome = msg.outcome;
-      // Apply gold
-      for (const p of Object.values(state.players)) {
-        p.gold = (p.gold || 0) + (msg.outcome.goldPerPlayer || 0);
-      }
-      renderAll();
-      renderOutcome();
-      break;
-    }
-    case "next-stage": {
-      state.stageIndex = msg.stageIndex;
-      state.currentChoices = {};
-      state.lastOutcome = null;
-      for (const p of Object.values(state.players)) { p.lockedIn = false; p.choice = null; }
-      if (state.stageIndex >= STAGES.length) {
-        state.phase = "done";
-        renderAll();
-        renderEnd();
-      } else {
-        state.phase = "playing";
-        renderAll();
-        renderStage();
-      }
-      break;
-    }
-  }
+// --- Host / join ---
+async function hostRoom() {
+  const name = $("#name").value.trim();
+  if (!name) return banner("Enter your name first.", "error");
+  if (!initSupabase()) return;
+  state.myName = name;
+  state.roomCode = makeRoomCode();
+  state.isHost = true;
+  await connectChannel();
+  enterLobby();
 }
 
-// --- Phase transitions ---
-function goToRolePick() {
+async function joinRoom() {
+  const name = $("#name").value.trim();
+  const code = $("#room-code-input").value.trim().toUpperCase();
+  if (!name) return banner("Enter your name first.", "error");
+  if (code.length !== 6) return banner("Enter a 6-char room code.", "error");
+  if (!initSupabase()) return;
+  state.myName = name;
+  state.roomCode = code;
+  state.isHost = false;
+  await connectChannel();
+  enterLobby();
+}
+
+function enterLobby() {
+  state.phase = "lobby";
   hide("#screen-home");
   show("#screen-role");
   setText("#room-code-display", state.roomCode);
   renderRolePick();
 }
 
-function pickRole(role) {
-  // Make sure no one else has it
-  const taken = Object.values(state.players).find(p => p.role === role && p !== state.players[state.myId]);
-  if (taken) return showBanner("That role is taken — pick another.");
-  state.myRole = role;
-  if (!state.players[state.myId]) state.players[state.myId] = { name: state.myName, gold: 0, lockedIn: false };
-  state.players[state.myId].role = role;
-  state.players[state.myId].name = state.myName;
-  send({ type: "role-pick", id: state.myId, name: state.myName, role });
-  renderRolePick();
-  checkStartReady();
-}
-
-function checkStartReady() {
-  const filled = Object.values(state.players).filter(p => p.role).length;
-  const startBtn = $("#start-btn");
-  if (filled === 3 && state.isHost) {
-    startBtn.classList.remove("hidden");
-    startBtn.disabled = false;
-  } else {
-    startBtn.classList.add("hidden");
-  }
-  if (filled === 3 && !state.isHost) {
-    setText("#waiting-host", "All 3 roles picked — waiting for host to start…");
-  } else {
-    setText("#waiting-host", "");
-  }
-}
-
-function startGame() {
-  send({ type: "start-game" });
-}
-
-// --- Stage resolution ---
-function lockChoice(optionId) {
-  if (state.players[state.myId]?.lockedIn) return;
-  state.players[state.myId].lockedIn = true;
-  state.players[state.myId].choice = optionId;
-  state.currentChoices[state.myRole] = optionId;
-  send({ type: "lock-choice", id: state.myId, role: state.myRole, choice: optionId });
-  renderStage();
-}
-
-function resolveStage() {
-  const stage = STAGES[state.stageIndex];
-  const picks = { ...state.currentChoices };
-  let bestMatch = null;
-  let bestScore = -1;
-
-  for (const syn of (stage.synergies || [])) {
-    let score = 0;
-    let match = true;
-    for (const [role, opt] of Object.entries(syn.picks)) {
-      if (picks[role] === opt) score++;
-      else { match = false; break; }
+// --- Message handler ---
+function handle(m) {
+  switch (m.type) {
+    case "hello": {
+      if (!state.players[m.id]) {
+        state.players[m.id] = { name: m.name, role: null, x: 0, y: 0, hp: 0, maxHp: 0, gold: 0, alive: true };
+      } else {
+        state.players[m.id].name = m.name;
+      }
+      if (state.isHost) sendSnapshotTo(m.id);
+      renderHud();
+      renderRolePick();
+      break;
     }
-    if (match && score > bestScore) {
-      bestScore = score;
-      bestMatch = syn;
+    case "req-state": {
+      if (state.isHost && m.id !== state.myId) sendSnapshotTo(m.id);
+      break;
+    }
+    case "snapshot": {
+      if (m.to !== state.myId) return;
+      for (const [id, p] of Object.entries(m.players)) {
+        state.players[id] = { ...(state.players[id] || {}), ...p };
+      }
+      state.phase = m.phase;
+      if (m.world) state.world = m.world;
+      if (m.entities) state.entities = m.entities;
+      renderHud();
+      if (state.phase === "lobby") renderRolePick();
+      if (state.phase === "playing") enterGame();
+      break;
+    }
+    case "role-pick": {
+      if (!state.players[m.id]) state.players[m.id] = { name: m.name, gold: 0, alive: true };
+      state.players[m.id].role = m.role;
+      state.players[m.id].name = m.name;
+      const role = ROLES[m.role];
+      state.players[m.id].maxHp = role.maxHp;
+      state.players[m.id].hp = role.maxHp;
+      renderRolePick();
+      renderHud();
+      break;
+    }
+    case "start": {
+      state.phase = "playing";
+      state.world = m.world;
+      state.entities = m.entities;
+      for (const [id, p] of Object.entries(m.players)) {
+        state.players[id] = { ...(state.players[id] || {}), ...p };
+      }
+      enterGame();
+      break;
+    }
+    case "move": {
+      if (state.players[m.id]) {
+        state.players[m.id].x = m.x;
+        state.players[m.id].y = m.y;
+      }
+      renderPlayers();
+      // Host: check if anyone walked onto an item
+      if (state.isHost) hostCheckPickup(m.id);
+      break;
+    }
+    case "attack": {
+      if (state.isHost) hostResolveAttack(m.id);
+      break;
+    }
+    case "ability": {
+      if (state.isHost) hostResolveAbility(m.id);
+      break;
+    }
+    case "entity-update": {
+      state.entities[m.id] = m.entity;
+      renderEntities();
+      break;
+    }
+    case "entity-remove": {
+      delete state.entities[m.id];
+      renderEntities();
+      break;
+    }
+    case "player-hp": {
+      if (state.players[m.id]) {
+        state.players[m.id].hp = m.hp;
+        if (m.x !== undefined) state.players[m.id].x = m.x;
+        if (m.y !== undefined) state.players[m.id].y = m.y;
+        state.players[m.id].alive = m.hp > 0;
+      }
+      renderHud();
+      renderPlayers();
+      if (m.id === state.myId && m.hp <= 0) flashScreen("hurt");
+      else if (m.id === state.myId && m.delta < 0) flashScreen("hurt");
+      else if (m.id === state.myId && m.delta > 0) flashScreen("heal");
+      break;
+    }
+    case "player-gold": {
+      if (state.players[m.id]) state.players[m.id].gold = m.gold;
+      renderHud();
+      if (m.id === state.myId) toast(`+${m.delta} gold`, "gold");
+      break;
+    }
+    case "win": {
+      state.phase = "won";
+      show("#screen-end");
+      $("#end-title").textContent = "The Pale Lord falls.";
+      $("#end-sub").textContent = "The ruin grows silent. The three of you stand victorious.";
+      $("#end-stats").innerHTML = endStatsHTML();
+      hide("#screen-game");
+      break;
+    }
+    case "lose": {
+      state.phase = "lost";
+      show("#screen-end");
+      $("#end-title").textContent = "The trail claims you.";
+      $("#end-sub").textContent = "All three of you fell. The forest goes quiet.";
+      $("#end-stats").innerHTML = endStatsHTML();
+      hide("#screen-game");
+      break;
     }
   }
-
-  let gold = 0;
-  let msg = "";
-  if (bestMatch) {
-    gold = bestMatch.gold;
-    msg = bestMatch.msg;
-  } else {
-    // No synergy — base reward by avg risk
-    const risks = Object.entries(picks).map(([role, optId]) => {
-      const opt = (stage.options[role] || []).find(o => o.id === optId);
-      return opt?.risk ?? 1;
-    });
-    const avgRisk = risks.reduce((a, b) => a + b, 0) / Math.max(risks.length, 1);
-    gold = Math.max(0, Math.round(10 - avgRisk * 2));
-    msg = avgRisk >= 2.5
-      ? "You stumble through. Costly lesson, little reward."
-      : "You make it through. A modest find on the way.";
-  }
-
-  const goldPerPlayer = Math.round(gold / 3);
-  const outcome = { stageId: stage.id, picks, gold, goldPerPlayer, msg };
-  send({ type: "outcome", outcome });
 }
 
-function nextStage() {
-  send({ type: "next-stage", stageIndex: state.stageIndex + 1 });
+function sendSnapshotTo(toId) {
+  send({
+    type: "snapshot",
+    to: toId,
+    players: state.players,
+    phase: state.phase,
+    world: state.world,
+    entities: state.entities,
+  });
 }
 
-// --- Rendering ---
-function renderAll() {
-  renderPlayers();
-  checkStartReady();
-}
-
-function renderPlayers() {
-  const container = $("#players");
-  if (!container) return;
-  container.innerHTML = "";
-  // Show 3 slots ordered by role
-  const byRole = { scout: null, brawler: null, mystic: null };
-  for (const [id, p] of Object.entries(state.players)) {
-    if (p.role) byRole[p.role] = { id, ...p };
-  }
-  for (const role of ["scout", "brawler", "mystic"]) {
-    const p = byRole[role];
-    const tile = document.createElement("div");
-    tile.className = `player-tile ${role}` + (p?.lockedIn ? " locked-in" : "");
-    tile.innerHTML = `
-      <div class="role-name">${ROLES[role].glyph} ${ROLES[role].name}</div>
-      <div class="player-name">${p ? escapeHTML(p.name) : "— empty —"}</div>
-      <div class="gold">${p ? `${p.gold || 0} gold` : ""}</div>
-    `;
-    container.appendChild(tile);
-  }
-}
-
+// --- Lobby / role pick ---
 function renderRolePick() {
   const container = $("#role-pick");
   container.innerHTML = "";
   for (const [role, info] of Object.entries(ROLES)) {
     const taken = Object.values(state.players).find(p => p.role === role);
-    const isMine = state.myRole === role;
+    const mine = state.myRole === role;
     const div = document.createElement("div");
-    div.className = `role-card ${role}` + (taken && !isMine ? " taken" : "");
+    div.className = `role-card ${role}` + (taken && !mine ? " taken" : "") + (mine ? " mine" : "");
     div.innerHTML = `
       <span class="glyph">${info.glyph}</span>
       <div class="name">${info.name}</div>
       <div class="desc">${info.desc}</div>
-      ${taken ? `<div class="muted" style="margin-top:8px;">${escapeHTML(taken.name)}${isMine ? " (you)" : ""}</div>` : ""}
+      <div class="stats">HP ${info.maxHp} · DMG ${info.dmg}</div>
+      ${taken ? `<div class="muted-small">${escapeHTML(taken.name)}${mine ? " (you)" : ""}</div>` : ""}
     `;
-    if (!taken || isMine) div.addEventListener("click", () => pickRole(role));
+    if (!taken || mine) div.addEventListener("click", () => pickRole(role));
     container.appendChild(div);
   }
-  renderPlayers();
-}
+  renderLobbyPlayers();
 
-function renderStage() {
-  hide("#screen-role");
-  hide("#screen-outcome");
-  hide("#screen-end");
-  show("#screen-stage");
-  const stage = STAGES[state.stageIndex];
-  setText("#stage-num", `Stage ${state.stageIndex + 1} of ${STAGES.length}`);
-  setText("#stage-title", stage.title);
-  setText("#scene", stage.scene);
-
-  const opts = stage.options[state.myRole] || [];
-  const me = state.players[state.myId];
-  const locked = me?.lockedIn;
-  const container = $("#options");
-  container.innerHTML = "";
-  for (const opt of opts) {
-    const btn = document.createElement("button");
-    btn.className = "option" + (me?.choice === opt.id ? " picked" : "") + (locked ? " locked" : "");
-    btn.disabled = locked;
-    btn.innerHTML = `<strong>${escapeHTML(opt.label)}</strong>`;
-    btn.addEventListener("click", () => lockChoice(opt.id));
-    container.appendChild(btn);
-  }
-
-  // Status line
-  const filledRoles = Object.values(state.players).filter(p => p.role);
-  const lockedCount = filledRoles.filter(p => p.lockedIn).length;
-  setText("#stage-status", `${lockedCount} of ${filledRoles.length} locked in${locked ? " — waiting on others…" : ""}`);
-  renderPlayers();
-}
-
-function renderOutcome() {
-  hide("#screen-stage");
-  show("#screen-outcome");
-  const o = state.lastOutcome;
-  const stage = STAGES[state.stageIndex];
-  setText("#outcome-stage", `${stage.title} — Stage ${state.stageIndex + 1}`);
-  setText("#outcome-gold", `+${o.gold} gold (${o.goldPerPlayer} each)`);
-  setText("#outcome-msg", o.msg);
-
-  // Choice summary
-  const summary = $("#choice-summary");
-  summary.innerHTML = "";
-  for (const role of ["scout", "brawler", "mystic"]) {
-    const optId = o.picks[role];
-    const opt = (stage.options[role] || []).find(x => x.id === optId);
-    const div = document.createElement("div");
-    div.className = "pick";
-    div.innerHTML = `
-      <div class="who">${ROLES[role].glyph} ${ROLES[role].name}</div>
-      <div>${opt ? escapeHTML(opt.label) : "(no choice)"}</div>
-    `;
-    summary.appendChild(div);
-  }
-
-  const nextBtn = $("#next-btn");
-  if (state.isHost) {
-    nextBtn.classList.remove("hidden");
-    nextBtn.textContent = state.stageIndex + 1 >= STAGES.length ? "See the End" : "Continue Trail →";
+  const filled = Object.values(state.players).filter(p => p.role).length;
+  const sb = $("#start-btn");
+  if (filled === 3 && state.isHost) {
+    sb.classList.remove("hidden");
+    setText("#waiting-host", "");
   } else {
-    nextBtn.classList.add("hidden");
+    sb.classList.add("hidden");
+    setText("#waiting-host", filled === 3 ? "All roles filled — waiting for host to start…" : `${filled} of 3 chosen…`);
   }
+}
+
+function renderLobbyPlayers() {
+  const c = $("#lobby-players");
+  if (!c) return;
+  c.innerHTML = "";
+  for (const role of ["scout", "brawler", "mystic"]) {
+    const p = Object.values(state.players).find(x => x.role === role);
+    const tile = document.createElement("div");
+    tile.className = `lobby-tile ${role}`;
+    tile.innerHTML = `
+      <div class="role-name">${ROLES[role].glyph} ${ROLES[role].name}</div>
+      <div class="player-name">${p ? escapeHTML(p.name) : "— empty —"}</div>
+    `;
+    c.appendChild(tile);
+  }
+}
+
+function pickRole(role) {
+  const taken = Object.values(state.players).find(p => p.role === role);
+  if (taken && taken !== state.players[state.myId]) {
+    return banner("That role is taken — pick another.", "error");
+  }
+  state.myRole = role;
+  if (!state.players[state.myId]) state.players[state.myId] = { name: state.myName, gold: 0, alive: true };
+  state.players[state.myId].role = role;
+  state.players[state.myId].name = state.myName;
+  state.players[state.myId].maxHp = ROLES[role].maxHp;
+  state.players[state.myId].hp = ROLES[role].maxHp;
+  send({ type: "role-pick", id: state.myId, name: state.myName, role });
+}
+
+function startGame() {
+  // Host generates the world
+  const seed = Math.floor(Math.random() * 0x7fffffff);
+  const w = generateWorld(seed);
+  state.world = { W: w.W, H: w.H, tiles: w.tiles, spawns: w.spawns };
+  state.entities = w.entities;
+
+  // Assign spawn positions per role
+  const order = ["scout", "brawler", "mystic"];
+  for (const [id, p] of Object.entries(state.players)) {
+    if (!p.role) continue;
+    const idx = order.indexOf(p.role);
+    const sp = w.spawns[idx] || w.spawns[0];
+    p.x = sp.x;
+    p.y = sp.y;
+    p.hp = ROLES[p.role].maxHp;
+    p.maxHp = ROLES[p.role].maxHp;
+    p.gold = 0;
+    p.alive = true;
+  }
+
+  send({ type: "start", world: state.world, entities: state.entities, players: state.players });
+}
+
+// --- Game ---
+function enterGame() {
+  hide("#screen-role");
+  hide("#screen-home");
+  hide("#screen-end");
+  show("#screen-game");
+  renderWorld();
+  renderEntities();
+  renderPlayers();
+  renderHud();
+  centerOnMe();
+  if (state.isHost) startHostLoop();
+}
+
+function renderWorld() {
+  const w = state.world;
+  const board = $("#board");
+  board.style.width = (w.W * TILE_PX) + "px";
+  board.style.height = (w.H * TILE_PX) + "px";
+  const tilesEl = $("#tiles");
+  tilesEl.innerHTML = "";
+  for (let y = 0; y < w.H; y++) {
+    for (let x = 0; x < w.W; x++) {
+      const d = document.createElement("div");
+      d.className = "tile " + w.tiles[y][x];
+      d.style.left = (x * TILE_PX) + "px";
+      d.style.top = (y * TILE_PX) + "px";
+      tilesEl.appendChild(d);
+    }
+  }
+}
+
+function renderEntities() {
+  const layer = $("#entities");
+  layer.innerHTML = "";
+  for (const [id, e] of Object.entries(state.entities)) {
+    const d = document.createElement("div");
+    d.className = "entity " + e.type;
+    d.style.left = (e.x * TILE_PX) + "px";
+    d.style.top = (e.y * TILE_PX) + "px";
+    if (e.type === "gold")    d.innerHTML = "<span>$</span>";
+    if (e.type === "flower")  d.innerHTML = "<span>✿</span>";
+    if (e.type === "chest")   d.innerHTML = "<span>▣</span>";
+    if (e.type === "monster") d.innerHTML = `<span>${e.name[0]}</span><div class="hp-bar"><div style="width:${(e.hp/e.maxHp)*100}%"></div></div>`;
+    if (e.type === "boss")    { d.classList.add("big"); d.innerHTML = `<span>☠</span><div class="hp-bar boss"><div style="width:${(e.hp/e.maxHp)*100}%"></div></div>`; }
+    layer.appendChild(d);
+  }
+}
+
+function renderPlayers() {
+  const layer = $("#players-layer");
+  layer.innerHTML = "";
+  for (const [id, p] of Object.entries(state.players)) {
+    if (!p.role || p.x === undefined) continue;
+    const d = document.createElement("div");
+    d.className = "player " + p.role + (id === state.myId ? " me" : "") + (p.alive ? "" : " dead");
+    d.style.left = (p.x * TILE_PX) + "px";
+    d.style.top = (p.y * TILE_PX) + "px";
+    d.innerHTML = `<span>${ROLES[p.role].glyph}</span><div class="name">${escapeHTML(p.name)}</div>`;
+    layer.appendChild(d);
+  }
+  centerOnMe();
+}
+
+function centerOnMe() {
+  const me = state.players[state.myId];
+  if (!me || me.x === undefined) return;
+  const view = $("#view");
+  const targetX = me.x * TILE_PX - view.clientWidth / 2 + TILE_PX / 2;
+  const targetY = me.y * TILE_PX - view.clientHeight / 2 + TILE_PX / 2;
+  view.scrollTo({ left: targetX, top: targetY, behavior: "smooth" });
+}
+
+function renderHud() {
+  const hud = $("#hud");
+  if (!hud) return;
+  hud.innerHTML = "";
+  for (const role of ["scout", "brawler", "mystic"]) {
+    const p = Object.values(state.players).find(x => x.role === role);
+    if (!p) continue;
+    const pct = p.maxHp ? Math.max(0, (p.hp / p.maxHp) * 100) : 0;
+    const tile = document.createElement("div");
+    tile.className = `hud-tile ${role}` + (p.alive ? "" : " dead");
+    tile.innerHTML = `
+      <div class="role-row">${ROLES[role].glyph} <strong>${escapeHTML(p.name)}</strong> <span class="role-tag">${ROLES[role].name}</span></div>
+      <div class="hp-row"><div class="hp-bar"><div style="width:${pct}%"></div></div><span class="hp-num">${p.hp}/${p.maxHp}</span></div>
+      <div class="gold-row">★ ${p.gold} gold</div>
+    `;
+    hud.appendChild(tile);
+  }
+}
+
+// --- Input ---
+function tryMove(dx, dy) {
+  const me = state.players[state.myId];
+  if (!me || !me.alive) return;
+  const now = performance.now();
+  const cd = ROLES[state.myRole].moveMs;
+  if (now - state.lastMoveAt < cd) return;
+  const nx = me.x + dx, ny = me.y + dy;
+  if (!isWalkable(state.world, nx, ny)) return;
+  // Blocked by monster or boss tile
+  const blocker = Object.values(state.entities).find(e =>
+    (e.type === "monster" || e.type === "boss") && e.x === nx && e.y === ny);
+  if (blocker) return;
+  me.x = nx; me.y = ny;
+  state.lastMoveAt = now;
+  send({ type: "move", id: state.myId, x: nx, y: ny });
   renderPlayers();
 }
 
-function renderEnd() {
-  hide("#screen-stage");
-  hide("#screen-outcome");
-  show("#screen-end");
-  const players = Object.values(state.players).filter(p => p.role).sort((a, b) => (b.gold || 0) - (a.gold || 0));
-  const total = players.reduce((a, p) => a + (p.gold || 0), 0);
-  setText("#end-total", `${total} gold`);
-  const list = $("#end-list");
-  list.innerHTML = "";
-  players.forEach((p, i) => {
-    const div = document.createElement("div");
-    div.className = "player-tile " + p.role;
-    div.innerHTML = `
-      <div class="role-name">${i === 0 ? "★ " : ""}${ROLES[p.role].glyph} ${ROLES[p.role].name}</div>
-      <div class="player-name">${escapeHTML(p.name)}</div>
-      <div class="gold">${p.gold || 0} gold</div>
-    `;
-    list.appendChild(div);
+function tryAttack() {
+  const me = state.players[state.myId];
+  if (!me || !me.alive) return;
+  send({ type: "attack", id: state.myId });
+}
+
+function tryAbility() {
+  const me = state.players[state.myId];
+  if (!me || !me.alive) return;
+  if (state.myRole !== "mystic") return;
+  const now = performance.now();
+  if (now - state.lastAbilityAt < 8000) {
+    banner("Ability cooling down…", "info");
+    return;
+  }
+  state.lastAbilityAt = now;
+  send({ type: "ability", id: state.myId });
+}
+
+// --- Host logic (authoritative) ---
+function hostCheckPickup(playerId) {
+  const p = state.players[playerId];
+  if (!p) return;
+  for (const [id, e] of Object.entries(state.entities)) {
+    if (e.x !== p.x || e.y !== p.y) continue;
+    if (e.type === "gold" || e.type === "chest") {
+      const delta = e.value ?? e.gold ?? 0;
+      p.gold = (p.gold || 0) + delta;
+      send({ type: "player-gold", id: playerId, gold: p.gold, delta });
+      delete state.entities[id];
+      send({ type: "entity-remove", id });
+    } else if (e.type === "flower") {
+      const newHp = Math.min(p.maxHp, p.hp + e.heal);
+      const delta = newHp - p.hp;
+      p.hp = newHp;
+      send({ type: "player-hp", id: playerId, hp: newHp, delta });
+      delete state.entities[id];
+      send({ type: "entity-remove", id });
+    }
+  }
+}
+
+function hostResolveAttack(playerId) {
+  const p = state.players[playerId];
+  if (!p || !p.alive) return;
+  // Find adjacent monster/boss
+  let target = null, targetId = null;
+  for (const [id, e] of Object.entries(state.entities)) {
+    if (e.type !== "monster" && e.type !== "boss") continue;
+    if (manhattan(p, e) === 1) { target = e; targetId = id; break; }
+  }
+  if (!target) return;
+  const role = ROLES[p.role];
+  target.hp -= role.dmg;
+  if (target.hp <= 0) {
+    p.gold = (p.gold || 0) + (target.gold || 0);
+    send({ type: "player-gold", id: playerId, gold: p.gold, delta: target.gold || 0 });
+    delete state.entities[targetId];
+    send({ type: "entity-remove", id: targetId });
+    if (target.type === "boss") {
+      send({ type: "win" });
+      state.phase = "won";
+    }
+  } else {
+    state.entities[targetId] = target;
+    send({ type: "entity-update", id: targetId, entity: target });
+  }
+}
+
+function hostResolveAbility(playerId) {
+  // Mystic heal pulse: heal all allies within 3 tiles for 12 HP
+  const p = state.players[playerId];
+  if (!p) return;
+  for (const [id, ally] of Object.entries(state.players)) {
+    if (!ally.role || !ally.alive) continue;
+    if (manhattan(ally, p) <= 3) {
+      const newHp = Math.min(ally.maxHp, ally.hp + 12);
+      const delta = newHp - ally.hp;
+      if (delta > 0) {
+        ally.hp = newHp;
+        send({ type: "player-hp", id, hp: newHp, delta });
+      }
+    }
+  }
+}
+
+function startHostLoop() {
+  if (state._loop) return;
+  state._loop = setInterval(() => hostTick(), 700);
+}
+
+function hostTick() {
+  if (state.phase !== "playing") return;
+  // Monsters: if a player is adjacent, attack them
+  for (const [eid, e] of Object.entries(state.entities)) {
+    if (e.type !== "monster" && e.type !== "boss") continue;
+    let victim = null, victimId = null;
+    for (const [pid, p] of Object.entries(state.players)) {
+      if (!p.alive || !p.role) continue;
+      if (manhattan(p, e) === 1) { victim = p; victimId = pid; break; }
+    }
+    if (victim) {
+      victim.hp -= e.dmg;
+      if (victim.hp <= 0) {
+        victim.hp = 0;
+        victim.alive = false;
+        // Respawn at spawn after 4 seconds
+        setTimeout(() => respawn(victimId), 4000);
+      }
+      send({ type: "player-hp", id: victimId, hp: victim.hp, delta: -e.dmg });
+    }
+  }
+  // Check if all alive players are dead
+  const aliveCount = Object.values(state.players).filter(p => p.role && p.alive).length;
+  const totalPlayers = Object.values(state.players).filter(p => p.role).length;
+  if (totalPlayers >= 1 && aliveCount === 0) {
+    // already all dead and respawning; treat as defeat if all 3 dead simultaneously
+    // Only trigger lose if no respawn happens — we already schedule respawn, so skip
+  }
+}
+
+function respawn(playerId) {
+  const p = state.players[playerId];
+  if (!p) return;
+  const order = ["scout", "brawler", "mystic"];
+  const sp = state.world.spawns[order.indexOf(p.role)] || state.world.spawns[0];
+  p.x = sp.x; p.y = sp.y;
+  p.hp = Math.floor(p.maxHp * 0.7);
+  p.alive = true;
+  send({ type: "player-hp", id: playerId, hp: p.hp, delta: p.hp, x: sp.x, y: sp.y });
+}
+
+// --- FX helpers ---
+function flashScreen(kind) {
+  const f = $("#flash");
+  f.className = "flash " + kind;
+  setTimeout(() => { f.className = "flash"; }, 250);
+}
+
+function toast(text, kind = "info") {
+  const t = document.createElement("div");
+  t.className = "toast " + kind;
+  t.textContent = text;
+  $("#toasts").appendChild(t);
+  setTimeout(() => t.classList.add("fade"), 1100);
+  setTimeout(() => t.remove(), 1700);
+}
+
+function endStatsHTML() {
+  return Object.values(state.players)
+    .filter(p => p.role)
+    .sort((a, b) => (b.gold || 0) - (a.gold || 0))
+    .map((p, i) => `
+      <div class="hud-tile ${p.role}">
+        <div class="role-row">${i === 0 ? "★ " : ""}${ROLES[p.role].glyph} <strong>${escapeHTML(p.name)}</strong></div>
+        <div class="gold-row">${p.gold || 0} gold</div>
+      </div>
+    `).join("");
+}
+
+// --- Keyboard ---
+function setupInput() {
+  document.addEventListener("keydown", (e) => {
+    if (state.phase !== "playing") return;
+    if (state.pressed[e.key]) return;
+    state.pressed[e.key] = true;
+    const k = e.key.toLowerCase();
+    if (k === "w" || k === "arrowup")    tryMove(0, -1);
+    else if (k === "s" || k === "arrowdown")  tryMove(0, 1);
+    else if (k === "a" || k === "arrowleft")  tryMove(-1, 0);
+    else if (k === "d" || k === "arrowright") tryMove(1, 0);
+    else if (k === " ") { e.preventDefault(); tryAttack(); }
+    else if (k === "e") tryAbility();
   });
+  document.addEventListener("keyup", (e) => { state.pressed[e.key] = false; });
+
+  // Hold-to-move
+  setInterval(() => {
+    if (state.phase !== "playing") return;
+    if (state.pressed["w"] || state.pressed["ArrowUp"])    tryMove(0, -1);
+    else if (state.pressed["s"] || state.pressed["ArrowDown"])  tryMove(0, 1);
+    else if (state.pressed["a"] || state.pressed["ArrowLeft"])  tryMove(-1, 0);
+    else if (state.pressed["d"] || state.pressed["ArrowRight"]) tryMove(1, 0);
+  }, 60);
 }
 
-function escapeHTML(s) {
-  return String(s).replace(/[&<>"']/g, (c) => ({
-    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
-  }[c]));
-}
-
-// --- Wire up ---
+// --- Wire-up ---
 document.addEventListener("DOMContentLoaded", () => {
   $("#host-btn").addEventListener("click", hostRoom);
   $("#join-btn").addEventListener("click", joinRoom);
   $("#start-btn").addEventListener("click", startGame);
-  $("#next-btn").addEventListener("click", nextStage);
   $("#play-again").addEventListener("click", () => location.reload());
+  $("#btn-attack").addEventListener("click", tryAttack);
+  $("#btn-ability").addEventListener("click", tryAbility);
+  setupInput();
 });
