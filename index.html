@@ -3,87 +3,52 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Trail of Three</title>
+  <title>The Lantern Path</title>
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
-  <div id="banner" class="banner hidden"></div>
-  <div id="toasts"></div>
-  <div id="flash" class="flash"></div>
+  <!-- Three.js renders into this -->
+  <canvas id="scene"></canvas>
 
-  <!-- Home -->
-  <section id="screen-home" class="centered">
-    <div class="shell">
-      <h1>Trail of Three</h1>
-      <p class="tagline">A haunted wood. Three travelers. One ruin to silence.</p>
-      <div class="card stack">
-        <div>
-          <label for="name">Your name</label>
-          <input id="name" maxlength="20" placeholder="Traveler" />
-        </div>
-        <button id="host-btn">Host a new trail</button>
-        <div class="or-divider">— or —</div>
-        <div>
-          <label for="room-code-input">Room code</label>
-          <input id="room-code-input" maxlength="6" placeholder="ABC123" style="text-transform:uppercase;letter-spacing:0.3em;text-align:center;" />
-        </div>
-        <button id="join-btn" class="ghost">Join a trail</button>
-        <div class="or-divider">— or —</div>
-        <button id="solo-btn" class="ghost">Solo trail (with AI companions)</button>
+  <!-- Title / start screen -->
+  <section id="screen-start" class="overlay centered">
+    <div class="title-block">
+      <h1>The Lantern Path</h1>
+      <p class="tagline">A story takes you through the wood. You decide who walks out.</p>
+      <button id="begin-btn">Begin</button>
+      <div class="hint">
+        <strong>WASD</strong> walk &nbsp;·&nbsp; <strong>Mouse</strong> look &nbsp;·&nbsp; <strong>E</strong> interact &nbsp;·&nbsp; <strong>ESC</strong> release mouse
       </div>
     </div>
   </section>
 
-  <!-- Role pick -->
-  <section id="screen-role" class="centered hidden">
-    <div class="shell">
-      <h1>Trail of Three</h1>
-      <div class="card" id="room-code-card">
-        <label>Room code — share with your two companions</label>
-        <div class="room-code" id="room-code-display"></div>
-      </div>
-      <div class="card hidden" id="solo-notice">
-        <p class="muted" style="text-align:center;font-style:italic;">
-          Solo trail — Embra, Korr, and Vael will walk with you. Pick your role.
-        </p>
-      </div>
-      <div class="card">
-        <h2>Choose your role</h2>
-        <p class="muted">One of each. The trail demands all three.</p>
-        <div class="role-pick" id="role-pick"></div>
-        <div id="lobby-players" class="lobby-players"></div>
-        <div class="muted" id="waiting-host" style="text-align:center;margin-top:8px;"></div>
-        <button id="start-btn" class="hidden" style="margin-top:12px;">Begin the trail →</button>
+  <!-- HUD shown while walking -->
+  <div id="hud">
+    <div id="interact-prompt" class="hidden">
+      <kbd>E</kbd> <span>Speak</span>
+    </div>
+    <div id="lantern-icon">✦</div>
+  </div>
+
+  <!-- Dialogue overlay -->
+  <section id="dialogue" class="hidden">
+    <div class="dialogue-box">
+      <div class="speaker" id="dialogue-speaker"></div>
+      <div class="text" id="dialogue-text"></div>
+      <div class="choices" id="dialogue-choices"></div>
+      <div class="footer">
+        <button id="continue-btn" class="ghost hidden">Continue ↵</button>
+        <span class="muted-small" id="dialogue-hint">Click to skip</span>
       </div>
     </div>
   </section>
 
-  <!-- Game -->
-  <section id="screen-game" class="hidden">
-    <div id="hud"></div>
-    <div id="view">
-      <div id="board">
-        <div id="tiles"></div>
-        <div id="entities"></div>
-        <div id="players-layer"></div>
-      </div>
-    </div>
-    <div id="controls">
-      <button id="btn-attack" class="action">⚔ Attack <kbd>SPACE</kbd></button>
-      <button id="btn-ability" class="action ghost">✧ Ability <kbd>E</kbd></button>
-      <span class="hint">WASD or arrows to move</span>
-    </div>
-  </section>
-
-  <!-- End -->
-  <section id="screen-end" class="centered hidden">
-    <div class="shell">
-      <div class="card" style="text-align:center;">
-        <h2 id="end-title">The trail ends.</h2>
-        <p class="muted" id="end-sub"></p>
-        <div id="end-stats" class="lobby-players" style="margin-top:16px;"></div>
-        <button id="play-again" class="ghost" style="margin-top:16px;">Walk it again</button>
-      </div>
+  <!-- Ending screen -->
+  <section id="screen-ending" class="overlay centered hidden">
+    <div class="title-block ending">
+      <h2 id="ending-title"></h2>
+      <div id="ending-text" class="ending-text"></div>
+      <button id="restart-btn">Walk it again</button>
     </div>
   </section>
 

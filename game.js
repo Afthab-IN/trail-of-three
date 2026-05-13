@@ -1,774 +1,533 @@
-import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
-import { SUPABASE_URL, SUPABASE_ANON_KEY } from "./config.js";
-import { generateWorld, isWalkable, manhattan, TILE_PX, WORLD_W, WORLD_H } from "./world.js";
+import * as THREE from "https://esm.sh/three@0.160.0";
+import { PointerLockControls } from "https://esm.sh/three@0.160.0/examples/jsm/controls/PointerLockControls.js";
+import { STORY_BEATS, computeEnding } from "./story.js";
 
-const ROLES = {
-  scout:   { name: "Scout",   glyph: "◈", color: "#6ec79b", desc: "Quick on their feet. Moves twice per tick.", maxHp: 25, dmg: 3, moveMs: 110 },
-  brawler: { name: "Brawler", glyph: "✦", color: "#d97455", desc: "Tough and heavy-handed. Hits twice as hard.", maxHp: 45, dmg: 6, moveMs: 220 },
-  mystic:  { name: "Mystic",  glyph: "✧", color: "#9b7ed4", desc: "Channels light. Press E to heal nearby allies.", maxHp: 28, dmg: 3, moveMs: 170 },
-};
-
+// --- Globals ---
 const state = {
-  supabase: null,
-  channel: null,
-  roomCode: null,
-  myId: crypto.randomUUID(),
-  myName: "",
-  myRole: null,
-  isHost: false,
-  solo: false,
-  phase: "home",
-  players: {},     // id -> { name, role, x, y, hp, maxHp, gold, alive, isAI? }
-  world: null,     // { W, H, tiles, spawns }
-  entities: {},    // id -> entity
-  lastMoveAt: 0,
-  lastAbilityAt: 0,
-  pressed: {},
-  aiHealCooldowns: {}, // aiId -> timestamp
+  renderer: null,
+  scene: null,
+  camera: null,
+  controls: null,
+  clock: new THREE.Clock(),
+  keys: {},
+  player: { x: 0, y: 1.6, z: 0, vx: 0, vz: 0 },
+  trees: [],     // {x, z, r}
+  npcs: {},      // beatId -> { group, light }
+  story: { seen: new Set(), flags: {}, currentBeat: null, lineIdx: 0 },
+  dialogueOpen: false,
+  nearbyBeat: null,
+  started: false,
+  finished: false,
 };
-
-const AI_NAMES = { scout: "Embra", brawler: "Korr", mystic: "Vael" };
 
 const $ = (s) => document.querySelector(s);
 
-function show(id) { $(id).classList.remove("hidden"); }
-function hide(id) { $(id).classList.add("hidden"); }
-function setText(s, t) { $(s).textContent = t; }
+// --- Three.js scene ---
+function initScene() {
+  const canvas = $("#scene");
+  state.renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+  state.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+  state.renderer.setSize(window.innerWidth, window.innerHeight);
+  state.renderer.shadowMap.enabled = false;
 
-function banner(msg, kind = "info") {
-  const b = $("#banner");
-  b.textContent = msg;
-  b.className = "banner" + (kind === "info" ? " info" : "");
-  b.classList.remove("hidden");
-  clearTimeout(banner._t);
-  banner._t = setTimeout(() => b.classList.add("hidden"), 4000);
+  const scene = new THREE.Scene();
+  scene.background = new THREE.Color(0x07060d);
+  scene.fog = new THREE.FogExp2(0x07060d, 0.045);
+  state.scene = scene;
+
+  const camera = new THREE.PerspectiveCamera(
+    72,
+    window.innerWidth / window.innerHeight,
+    0.1,
+    400
+  );
+  camera.position.set(0, 1.6, 0);
+  state.camera = camera;
+
+  // Ground — large dark plane with subtle pattern
+  const groundGeo = new THREE.PlaneGeometry(200, 400, 40, 80);
+  // Slight terrain variation
+  const pos = groundGeo.attributes.position;
+  for (let i = 0; i < pos.count; i++) {
+    const x = pos.getX(i);
+    const y = pos.getY(i);
+    const h = Math.sin(x * 0.07) * 0.15 + Math.cos(y * 0.09) * 0.12;
+    pos.setZ(i, h);
+  }
+  groundGeo.computeVertexNormals();
+  const groundMat = new THREE.MeshStandardMaterial({
+    color: 0x1a1f15,
+    roughness: 0.95,
+    metalness: 0.0,
+  });
+  const ground = new THREE.Mesh(groundGeo, groundMat);
+  ground.rotation.x = -Math.PI / 2;
+  ground.position.z = -100;
+  scene.add(ground);
+
+  // The path — a slightly lighter, longer strip
+  const pathGeo = new THREE.PlaneGeometry(3.2, 250);
+  const pathMat = new THREE.MeshStandardMaterial({
+    color: 0x2e2418,
+    roughness: 1.0,
+  });
+  const path = new THREE.Mesh(pathGeo, pathMat);
+  path.rotation.x = -Math.PI / 2;
+  path.position.set(0, 0.01, -110);
+  scene.add(path);
+
+  // Lighting
+  const ambient = new THREE.AmbientLight(0x3a4a66, 0.32);
+  scene.add(ambient);
+
+  const moon = new THREE.DirectionalLight(0xa0b8e0, 0.45);
+  moon.position.set(-30, 50, -20);
+  scene.add(moon);
+
+  // Player lantern — a warm point light following the camera
+  const lantern = new THREE.PointLight(0xf5c97a, 1.6, 12, 1.8);
+  lantern.position.set(0, 0, 0);
+  camera.add(lantern);
+  scene.add(camera);
+
+  // Distant moon disc
+  const moonGeo = new THREE.CircleGeometry(8, 32);
+  const moonMat = new THREE.MeshBasicMaterial({ color: 0xe8e0d0, transparent: true, opacity: 0.5 });
+  const moonMesh = new THREE.Mesh(moonGeo, moonMat);
+  moonMesh.position.set(-60, 50, -180);
+  moonMesh.lookAt(0, 1.6, 0);
+  scene.add(moonMesh);
+
+  // Trees scattered along the path
+  populateForest();
+
+  // NPCs at story beats
+  spawnNPCs();
+
+  // The Watchtower at the end
+  buildWatchtower();
+
+  // Controls
+  state.controls = new PointerLockControls(camera, state.renderer.domElement);
+
+  state.controls.addEventListener("lock",   () => $("#hud").classList.remove("hidden"));
+  state.controls.addEventListener("unlock", () => $("#hud").classList.add("hidden"));
+
+  window.addEventListener("resize", onResize);
+}
+
+function onResize() {
+  state.camera.aspect = window.innerWidth / window.innerHeight;
+  state.camera.updateProjectionMatrix();
+  state.renderer.setSize(window.innerWidth, window.innerHeight);
+}
+
+function populateForest() {
+  const rng = mulberry32(20260513);
+  const trunkMat = new THREE.MeshStandardMaterial({ color: 0x1a1410, roughness: 1.0 });
+  const canopyMat = new THREE.MeshStandardMaterial({ color: 0x0c180a, roughness: 1.0 });
+
+  for (let i = 0; i < 220; i++) {
+    const side = rng() < 0.5 ? -1 : 1;
+    const x = side * (2.2 + rng() * 18);
+    const z = -2 - rng() * 200;
+    const h = 5 + rng() * 6;
+    const r = 0.25 + rng() * 0.25;
+
+    const trunk = new THREE.Mesh(
+      new THREE.CylinderGeometry(r * 0.8, r, h, 6),
+      trunkMat
+    );
+    trunk.position.set(x, h / 2, z);
+    state.scene.add(trunk);
+
+    const canopy = new THREE.Mesh(
+      new THREE.ConeGeometry(1.4 + rng() * 0.9, 2.6 + rng() * 1.6, 6),
+      canopyMat
+    );
+    canopy.position.set(x, h + 0.6, z);
+    state.scene.add(canopy);
+
+    state.trees.push({ x, z, r: r + 0.2 });
+  }
+
+  // Ground tufts (small dark cones for variation)
+  const tuftMat = new THREE.MeshStandardMaterial({ color: 0x1f2a18, roughness: 1.0 });
+  for (let i = 0; i < 120; i++) {
+    const x = (rng() - 0.5) * 30;
+    const z = -rng() * 200;
+    const tuft = new THREE.Mesh(new THREE.ConeGeometry(0.3, 0.5, 5), tuftMat);
+    tuft.position.set(x, 0.25, z);
+    state.scene.add(tuft);
+  }
+}
+
+function spawnNPCs() {
+  for (const beat of STORY_BEATS) {
+    if (!beat.npc) continue;
+    const g = makeNPC(beat.npc);
+    g.position.set(beat.npc.x, 0, beat.npc.z);
+    state.scene.add(g);
+    state.npcs[beat.id] = g;
+  }
+}
+
+function makeNPC(spec) {
+  const group = new THREE.Group();
+
+  if (spec.type === "storyteller") {
+    // tall cloaked figure
+    const cloakMat = new THREE.MeshStandardMaterial({ color: 0x1a1024, roughness: 1 });
+    const body = new THREE.Mesh(new THREE.CylinderGeometry(0.45, 0.65, 1.8, 8), cloakMat);
+    body.position.y = 0.9;
+    group.add(body);
+    const head = new THREE.Mesh(
+      new THREE.SphereGeometry(0.25, 8, 8),
+      new THREE.MeshStandardMaterial({ color: 0x0a0612, roughness: 1 })
+    );
+    head.position.y = 1.95;
+    group.add(head);
+    // Lantern
+    const lantern = new THREE.Mesh(
+      new THREE.BoxGeometry(0.18, 0.22, 0.18),
+      new THREE.MeshStandardMaterial({ color: 0xc08a3e, emissive: 0xf5c97a, emissiveIntensity: 1.2 })
+    );
+    lantern.position.set(0.55, 1.2, 0);
+    group.add(lantern);
+    const lanternLight = new THREE.PointLight(0xf5c97a, 1.4, 6, 2);
+    lanternLight.position.set(0.55, 1.2, 0);
+    group.add(lanternLight);
+  } else if (spec.type === "wounded") {
+    // crouched figure
+    const mat = new THREE.MeshStandardMaterial({ color: 0x4a2230, roughness: 1 });
+    const body = new THREE.Mesh(new THREE.CapsuleGeometry(0.32, 0.4, 4, 8), mat);
+    body.position.y = 0.55;
+    body.rotation.z = 0.35;
+    group.add(body);
+    const head = new THREE.Mesh(
+      new THREE.SphereGeometry(0.22, 8, 8),
+      new THREE.MeshStandardMaterial({ color: 0xc09080, roughness: 1 })
+    );
+    head.position.set(0.25, 1.0, 0);
+    group.add(head);
+    const lantern = new THREE.Mesh(
+      new THREE.BoxGeometry(0.15, 0.18, 0.15),
+      new THREE.MeshStandardMaterial({ color: 0xc08a3e, emissive: 0xc45c5c, emissiveIntensity: 1.0 })
+    );
+    lantern.position.set(-0.3, 0.4, 0.3);
+    group.add(lantern);
+    const ll = new THREE.PointLight(0xc45c5c, 0.9, 4, 2);
+    ll.position.set(-0.3, 0.4, 0.3);
+    group.add(ll);
+  } else if (spec.type === "child") {
+    const mat = new THREE.MeshStandardMaterial({ color: 0x2a4a3a, roughness: 1 });
+    const body = new THREE.Mesh(new THREE.CapsuleGeometry(0.22, 0.5, 4, 8), mat);
+    body.position.y = 0.5;
+    group.add(body);
+    const head = new THREE.Mesh(
+      new THREE.SphereGeometry(0.18, 8, 8),
+      new THREE.MeshStandardMaterial({ color: 0xd0a888, roughness: 1 })
+    );
+    head.position.y = 1.0;
+    group.add(head);
+    const lantern = new THREE.Mesh(
+      new THREE.BoxGeometry(0.13, 0.16, 0.13),
+      new THREE.MeshStandardMaterial({ color: 0xc08a3e, emissive: 0x6ec79b, emissiveIntensity: 1.2 })
+    );
+    lantern.position.set(0.3, 0.5, 0);
+    group.add(lantern);
+    const ll = new THREE.PointLight(0x6ec79b, 1.0, 5, 2);
+    ll.position.set(0.3, 0.5, 0);
+    group.add(ll);
+  } else if (spec.type === "tower") {
+    // Placeholder — actual tower is built separately
+  }
+  return group;
+}
+
+function buildWatchtower() {
+  const towerMat = new THREE.MeshStandardMaterial({ color: 0x2a2630, roughness: 1.0 });
+  // Tower body
+  const body = new THREE.Mesh(new THREE.CylinderGeometry(2.2, 2.5, 14, 10), towerMat);
+  body.position.set(0, 7, -125);
+  state.scene.add(body);
+  // Top crown
+  const crown = new THREE.Mesh(new THREE.CylinderGeometry(2.5, 2.5, 1.2, 10), towerMat);
+  crown.position.set(0, 14.6, -125);
+  state.scene.add(crown);
+  // Beacon
+  const beacon = new THREE.Mesh(
+    new THREE.BoxGeometry(0.6, 0.9, 0.6),
+    new THREE.MeshStandardMaterial({ color: 0xc08a3e, emissive: 0xf5c97a, emissiveIntensity: 0.6 })
+  );
+  beacon.position.set(0, 15.6, -125);
+  state.scene.add(beacon);
+  const beaconLight = new THREE.PointLight(0xf5c97a, 1.8, 30, 2);
+  beaconLight.position.set(0, 15.6, -125);
+  state.scene.add(beaconLight);
+
+  // Track these for collision
+  state.trees.push({ x: 0, z: -125, r: 2.6 });
+}
+
+// --- Update loop ---
+function update(dt) {
+  if (!state.started || state.finished || state.dialogueOpen) return;
+
+  const speed = 4.0; // m/s
+  const fwd = (state.keys["w"] || state.keys["ArrowUp"]   ? 1 : 0)
+            + (state.keys["s"] || state.keys["ArrowDown"] ? -1 : 0);
+  const strafe = (state.keys["d"] || state.keys["ArrowRight"] ? 1 : 0)
+              + (state.keys["a"] || state.keys["ArrowLeft"]  ? -1 : 0);
+
+  if (state.controls.isLocked) {
+    if (fwd !== 0) state.controls.moveForward(fwd * speed * dt);
+    if (strafe !== 0) state.controls.moveRight(strafe * speed * dt);
+  }
+
+  // Constrain to play area
+  const cam = state.camera.position;
+  cam.x = Math.max(-22, Math.min(22, cam.x));
+  cam.z = Math.max(-180, Math.min(8, cam.z));
+  cam.y = 1.6;
+
+  // Simple tree collision — push out if too close
+  for (const t of state.trees) {
+    const dx = cam.x - t.x;
+    const dz = cam.z - t.z;
+    const d2 = dx * dx + dz * dz;
+    const minD = t.r + 0.4;
+    if (d2 < minD * minD) {
+      const d = Math.sqrt(d2) || 0.0001;
+      cam.x = t.x + (dx / d) * minD;
+      cam.z = t.z + (dz / d) * minD;
+    }
+  }
+
+  // Story trigger detection
+  detectNearbyBeat();
+}
+
+function detectNearbyBeat() {
+  const cam = state.camera.position;
+  let nearest = null;
+  let nearestDist = Infinity;
+  for (const beat of STORY_BEATS) {
+    if (state.story.seen.has(beat.id)) continue;
+    const dx = cam.x - beat.triggerAt.x;
+    const dz = cam.z - beat.triggerAt.z;
+    const d = Math.sqrt(dx * dx + dz * dz);
+    if (d < beat.triggerRadius && d < nearestDist) {
+      nearest = beat;
+      nearestDist = d;
+    }
+  }
+  if (nearest !== state.nearbyBeat) {
+    state.nearbyBeat = nearest;
+    const prompt = $("#interact-prompt");
+    if (nearest) prompt.classList.remove("hidden");
+    else prompt.classList.add("hidden");
+  }
+}
+
+function loop() {
+  const dt = Math.min(0.05, state.clock.getDelta());
+  update(dt);
+  state.renderer.render(state.scene, state.camera);
+  requestAnimationFrame(loop);
+}
+
+// --- Dialogue ---
+function openBeat(beat) {
+  state.dialogueOpen = true;
+  state.story.currentBeat = beat;
+  state.story.lineIdx = 0;
+  state.controls.unlock();
+  $("#interact-prompt").classList.add("hidden");
+
+  if (beat.final) {
+    // Compute and show ending directly
+    showEnding();
+    return;
+  }
+
+  $("#dialogue").classList.remove("hidden");
+  renderCurrentLine();
+}
+
+function renderCurrentLine(extraLines = null) {
+  const beat = state.story.currentBeat;
+  const lines = extraLines || beat.lines;
+  const i = state.story.lineIdx;
+  const line = lines[i];
+  if (!line) {
+    showChoices();
+    return;
+  }
+  $("#dialogue-speaker").textContent = line.who;
+  typewrite($("#dialogue-text"), line.text);
+  $("#dialogue-choices").innerHTML = "";
+  const cont = $("#continue-btn");
+  if (i < lines.length - 1) {
+    cont.classList.remove("hidden");
+    cont.textContent = "Continue ↵";
+    cont.onclick = () => {
+      state.story.lineIdx++;
+      renderCurrentLine(lines);
+    };
+  } else {
+    cont.classList.remove("hidden");
+    cont.textContent = "↵";
+    cont.onclick = () => {
+      // Reached end of lines — show choices
+      showChoices();
+    };
+  }
+}
+
+function showChoices() {
+  const beat = state.story.currentBeat;
+  $("#dialogue-text").textContent = "";
+  $("#dialogue-speaker").textContent = "Your move.";
+  $("#continue-btn").classList.add("hidden");
+  const cs = $("#dialogue-choices");
+  cs.innerHTML = "";
+  if (!beat.choices || beat.choices.length === 0) {
+    closeDialogue();
+    return;
+  }
+  for (const c of beat.choices) {
+    const btn = document.createElement("button");
+    btn.className = "choice";
+    btn.textContent = c.label;
+    btn.addEventListener("click", () => selectChoice(c));
+    cs.appendChild(btn);
+  }
+}
+
+function selectChoice(choice) {
+  // Apply flags
+  if (choice.flags) {
+    for (const [k, v] of Object.entries(choice.flags)) {
+      if (typeof v === "number") {
+        state.story.flags[k] = (state.story.flags[k] || 0) + v;
+      } else {
+        state.story.flags[k] = v;
+      }
+    }
+  }
+  // Followup lines?
+  if (choice.followup && choice.followup.length) {
+    state.story.lineIdx = 0;
+    const lines = choice.followup;
+    $("#dialogue-speaker").textContent = lines[0].who;
+    typewrite($("#dialogue-text"), lines[0].text);
+    $("#dialogue-choices").innerHTML = "";
+    const cont = $("#continue-btn");
+    cont.classList.remove("hidden");
+    let i = 0;
+    cont.textContent = "Continue ↵";
+    cont.onclick = () => {
+      i++;
+      if (i >= lines.length) {
+        closeDialogue();
+      } else {
+        $("#dialogue-speaker").textContent = lines[i].who;
+        typewrite($("#dialogue-text"), lines[i].text);
+        if (i === lines.length - 1) cont.textContent = "↵";
+      }
+    };
+    return;
+  }
+  closeDialogue();
+}
+
+function closeDialogue() {
+  const beat = state.story.currentBeat;
+  if (beat) state.story.seen.add(beat.id);
+  state.dialogueOpen = false;
+  state.story.currentBeat = null;
+  $("#dialogue").classList.add("hidden");
+  state.nearbyBeat = null;
+}
+
+function typewrite(el, text) {
+  el.textContent = "";
+  let i = 0;
+  clearInterval(typewrite._t);
+  typewrite._t = setInterval(() => {
+    el.textContent += text[i] || "";
+    i++;
+    if (i >= text.length) clearInterval(typewrite._t);
+  }, 22);
+  // Click to skip
+  el.onclick = () => {
+    clearInterval(typewrite._t);
+    el.textContent = text;
+  };
+}
+
+// --- Ending ---
+function showEnding() {
+  state.finished = true;
+  const ending = computeEnding(state.story.flags);
+  $("#dialogue").classList.add("hidden");
+  $("#ending-title").textContent = ending.title;
+  $("#ending-text").innerHTML = ending.lines.map(l => `<p>${escapeHTML(l)}</p>`).join("");
+  $("#screen-ending").classList.remove("hidden");
 }
 
 function escapeHTML(s) {
   return String(s).replace(/[&<>"']/g, c => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[c]));
 }
 
-// --- Supabase init ---
-function initSupabase() {
-  if (SUPABASE_URL.includes("PASTE_") || SUPABASE_ANON_KEY.includes("PASTE_")) {
-    banner("Edit config.js with your Supabase URL and anon key.", "error");
-    return false;
-  }
-  state.supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
-  return true;
+// --- Start / restart ---
+function begin() {
+  $("#screen-start").classList.add("hidden");
+  state.started = true;
+  state.renderer.domElement.requestPointerLock?.();
+  state.controls.lock();
 }
 
-function makeRoomCode() {
-  const chars = "ABCDEFGHJKMNPQRSTVWXYZ23456789";
-  let c = "";
-  for (let i = 0; i < 6; i++) c += chars[Math.floor(Math.random() * chars.length)];
-  return c;
-}
-
-// --- Networking ---
-async function connectChannel() {
-  const channel = state.supabase.channel(`trail:${state.roomCode}`, {
-    config: { broadcast: { self: true }, presence: { key: state.myId } },
-  });
-
-  channel.on("broadcast", { event: "msg" }, ({ payload }) => handle(payload));
-  channel.on("presence", { event: "sync" }, () => {
-    const ps = channel.presenceState();
-    const present = new Set();
-    for (const arr of Object.values(ps)) for (const p of arr) present.add(p.id);
-    let changed = false;
-    for (const id of Object.keys(state.players)) {
-      if (!present.has(id)) { delete state.players[id]; changed = true; }
-    }
-    if (changed) renderHud();
-  });
-
-  await new Promise((res) => {
-    channel.subscribe(async (status) => {
-      if (status === "SUBSCRIBED") {
-        await channel.track({ id: state.myId, name: state.myName });
-        res();
-      }
-    });
-  });
-  state.channel = channel;
-
-  send({ type: "hello", id: state.myId, name: state.myName });
-  send({ type: "req-state", id: state.myId });
-}
-
-function send(payload) {
-  if (state.solo) {
-    // No network — just process locally on next tick
-    setTimeout(() => handle(payload), 0);
-    return;
-  }
-  state.channel.send({ type: "broadcast", event: "msg", payload });
-}
-
-// --- Host / join ---
-async function hostRoom() {
-  const name = $("#name").value.trim();
-  if (!name) return banner("Enter your name first.", "error");
-  if (!initSupabase()) return;
-  state.myName = name;
-  state.roomCode = makeRoomCode();
-  state.isHost = true;
-  await connectChannel();
-  enterLobby();
-}
-
-async function joinRoom() {
-  const name = $("#name").value.trim();
-  const code = $("#room-code-input").value.trim().toUpperCase();
-  if (!name) return banner("Enter your name first.", "error");
-  if (code.length !== 6) return banner("Enter a 6-char room code.", "error");
-  if (!initSupabase()) return;
-  state.myName = name;
-  state.roomCode = code;
-  state.isHost = false;
-  await connectChannel();
-  enterLobby();
-}
-
-function startSolo() {
-  const name = $("#name").value.trim();
-  if (!name) return banner("Enter your name first.", "error");
-  state.myName = name;
-  state.solo = true;
-  state.isHost = true;
-  state.players[state.myId] = { name, role: null, gold: 0, alive: true };
-  hide("#screen-home");
-  show("#screen-role");
-  // Hide multiplayer-specific bits, show solo notice
-  $("#room-code-card").classList.add("hidden");
-  $("#solo-notice").classList.remove("hidden");
-  renderRolePick();
-}
-
-function enterLobby() {
-  state.phase = "lobby";
-  hide("#screen-home");
-  show("#screen-role");
-  setText("#room-code-display", state.roomCode);
-  renderRolePick();
-}
-
-// --- Message handler ---
-function handle(m) {
-  switch (m.type) {
-    case "hello": {
-      if (!state.players[m.id]) {
-        state.players[m.id] = { name: m.name, role: null, x: 0, y: 0, hp: 0, maxHp: 0, gold: 0, alive: true };
-      } else {
-        state.players[m.id].name = m.name;
-      }
-      if (state.isHost) sendSnapshotTo(m.id);
-      renderHud();
-      renderRolePick();
-      break;
-    }
-    case "req-state": {
-      if (state.isHost && m.id !== state.myId) sendSnapshotTo(m.id);
-      break;
-    }
-    case "snapshot": {
-      if (m.to !== state.myId) return;
-      for (const [id, p] of Object.entries(m.players)) {
-        state.players[id] = { ...(state.players[id] || {}), ...p };
-      }
-      state.phase = m.phase;
-      if (m.world) state.world = m.world;
-      if (m.entities) state.entities = m.entities;
-      renderHud();
-      if (state.phase === "lobby") renderRolePick();
-      if (state.phase === "playing") enterGame();
-      break;
-    }
-    case "role-pick": {
-      if (!state.players[m.id]) state.players[m.id] = { name: m.name, gold: 0, alive: true };
-      state.players[m.id].role = m.role;
-      state.players[m.id].name = m.name;
-      const role = ROLES[m.role];
-      state.players[m.id].maxHp = role.maxHp;
-      state.players[m.id].hp = role.maxHp;
-      renderRolePick();
-      renderHud();
-      break;
-    }
-    case "start": {
-      state.phase = "playing";
-      state.world = m.world;
-      state.entities = m.entities;
-      for (const [id, p] of Object.entries(m.players)) {
-        state.players[id] = { ...(state.players[id] || {}), ...p };
-      }
-      enterGame();
-      break;
-    }
-    case "move": {
-      if (state.players[m.id]) {
-        state.players[m.id].x = m.x;
-        state.players[m.id].y = m.y;
-      }
-      renderPlayers();
-      // Host: check if anyone walked onto an item
-      if (state.isHost) hostCheckPickup(m.id);
-      break;
-    }
-    case "attack": {
-      if (state.isHost) hostResolveAttack(m.id);
-      break;
-    }
-    case "ability": {
-      if (state.isHost) hostResolveAbility(m.id);
-      break;
-    }
-    case "entity-update": {
-      state.entities[m.id] = m.entity;
-      renderEntities();
-      break;
-    }
-    case "entity-remove": {
-      delete state.entities[m.id];
-      renderEntities();
-      break;
-    }
-    case "player-hp": {
-      if (state.players[m.id]) {
-        state.players[m.id].hp = m.hp;
-        if (m.x !== undefined) state.players[m.id].x = m.x;
-        if (m.y !== undefined) state.players[m.id].y = m.y;
-        state.players[m.id].alive = m.hp > 0;
-      }
-      renderHud();
-      renderPlayers();
-      if (m.id === state.myId && m.hp <= 0) flashScreen("hurt");
-      else if (m.id === state.myId && m.delta < 0) flashScreen("hurt");
-      else if (m.id === state.myId && m.delta > 0) flashScreen("heal");
-      break;
-    }
-    case "player-gold": {
-      if (state.players[m.id]) state.players[m.id].gold = m.gold;
-      renderHud();
-      if (m.id === state.myId) toast(`+${m.delta} gold`, "gold");
-      break;
-    }
-    case "win": {
-      state.phase = "won";
-      show("#screen-end");
-      $("#end-title").textContent = "The Pale Lord falls.";
-      $("#end-sub").textContent = "The ruin grows silent. The three of you stand victorious.";
-      $("#end-stats").innerHTML = endStatsHTML();
-      hide("#screen-game");
-      break;
-    }
-    case "lose": {
-      state.phase = "lost";
-      show("#screen-end");
-      $("#end-title").textContent = "The trail claims you.";
-      $("#end-sub").textContent = "All three of you fell. The forest goes quiet.";
-      $("#end-stats").innerHTML = endStatsHTML();
-      hide("#screen-game");
-      break;
-    }
-  }
-}
-
-function sendSnapshotTo(toId) {
-  send({
-    type: "snapshot",
-    to: toId,
-    players: state.players,
-    phase: state.phase,
-    world: state.world,
-    entities: state.entities,
-  });
-}
-
-// --- Lobby / role pick ---
-function renderRolePick() {
-  const container = $("#role-pick");
-  container.innerHTML = "";
-  for (const [role, info] of Object.entries(ROLES)) {
-    const taken = Object.values(state.players).find(p => p.role === role);
-    const mine = state.myRole === role;
-    const div = document.createElement("div");
-    div.className = `role-card ${role}` + (taken && !mine ? " taken" : "") + (mine ? " mine" : "");
-    div.innerHTML = `
-      <span class="glyph">${info.glyph}</span>
-      <div class="name">${info.name}</div>
-      <div class="desc">${info.desc}</div>
-      <div class="stats">HP ${info.maxHp} · DMG ${info.dmg}</div>
-      ${taken ? `<div class="muted-small">${escapeHTML(taken.name)}${mine ? " (you)" : ""}</div>` : ""}
-    `;
-    if (!taken || mine) div.addEventListener("click", () => pickRole(role));
-    container.appendChild(div);
-  }
-  renderLobbyPlayers();
-
-  const filled = Object.values(state.players).filter(p => p.role).length;
-  const sb = $("#start-btn");
-  if (filled === 3 && state.isHost) {
-    sb.classList.remove("hidden");
-    setText("#waiting-host", "");
-  } else {
-    sb.classList.add("hidden");
-    setText("#waiting-host", filled === 3 ? "All roles filled — waiting for host to start…" : `${filled} of 3 chosen…`);
-  }
-}
-
-function renderLobbyPlayers() {
-  const c = $("#lobby-players");
-  if (!c) return;
-  c.innerHTML = "";
-  for (const role of ["scout", "brawler", "mystic"]) {
-    const p = Object.values(state.players).find(x => x.role === role);
-    const tile = document.createElement("div");
-    tile.className = `lobby-tile ${role}`;
-    tile.innerHTML = `
-      <div class="role-name">${ROLES[role].glyph} ${ROLES[role].name}</div>
-      <div class="player-name">${p ? escapeHTML(p.name) : "— empty —"}</div>
-    `;
-    c.appendChild(tile);
-  }
-}
-
-function pickRole(role) {
-  const taken = Object.values(state.players).find(p => p.role === role);
-  if (taken && taken !== state.players[state.myId]) {
-    return banner("That role is taken — pick another.", "error");
-  }
-  state.myRole = role;
-  if (!state.players[state.myId]) state.players[state.myId] = { name: state.myName, gold: 0, alive: true };
-  state.players[state.myId].role = role;
-  state.players[state.myId].name = state.myName;
-  state.players[state.myId].maxHp = ROLES[role].maxHp;
-  state.players[state.myId].hp = ROLES[role].maxHp;
-  send({ type: "role-pick", id: state.myId, name: state.myName, role });
-
-  if (state.solo) {
-    // Auto-fill the other two roles with AI companions and start
-    for (const r of ["scout", "brawler", "mystic"]) {
-      if (r === role) continue;
-      const aiId = "ai_" + r;
-      state.players[aiId] = {
-        name: AI_NAMES[r] + " (AI)",
-        role: r,
-        gold: 0,
-        alive: true,
-        isAI: true,
-        hp: ROLES[r].maxHp,
-        maxHp: ROLES[r].maxHp,
-      };
-    }
-    renderRolePick();
-    setTimeout(startGame, 500);
-  }
-}
-
-function startGame() {
-  // Host generates the world
-  const seed = Math.floor(Math.random() * 0x7fffffff);
-  const w = generateWorld(seed);
-  state.world = { W: w.W, H: w.H, tiles: w.tiles, spawns: w.spawns };
-  state.entities = w.entities;
-
-  // Assign spawn positions per role
-  const order = ["scout", "brawler", "mystic"];
-  for (const [id, p] of Object.entries(state.players)) {
-    if (!p.role) continue;
-    const idx = order.indexOf(p.role);
-    const sp = w.spawns[idx] || w.spawns[0];
-    p.x = sp.x;
-    p.y = sp.y;
-    p.hp = ROLES[p.role].maxHp;
-    p.maxHp = ROLES[p.role].maxHp;
-    p.gold = 0;
-    p.alive = true;
-  }
-
-  send({ type: "start", world: state.world, entities: state.entities, players: state.players });
-}
-
-// --- Game ---
-function enterGame() {
-  hide("#screen-role");
-  hide("#screen-home");
-  hide("#screen-end");
-  show("#screen-game");
-  renderWorld();
-  renderEntities();
-  renderPlayers();
-  renderHud();
-  centerOnMe();
-  if (state.isHost) startHostLoop();
-}
-
-function renderWorld() {
-  const w = state.world;
-  const board = $("#board");
-  board.style.width = (w.W * TILE_PX) + "px";
-  board.style.height = (w.H * TILE_PX) + "px";
-  const tilesEl = $("#tiles");
-  tilesEl.innerHTML = "";
-  for (let y = 0; y < w.H; y++) {
-    for (let x = 0; x < w.W; x++) {
-      const d = document.createElement("div");
-      d.className = "tile " + w.tiles[y][x];
-      d.style.left = (x * TILE_PX) + "px";
-      d.style.top = (y * TILE_PX) + "px";
-      tilesEl.appendChild(d);
-    }
-  }
-}
-
-function renderEntities() {
-  const layer = $("#entities");
-  layer.innerHTML = "";
-  for (const [id, e] of Object.entries(state.entities)) {
-    const d = document.createElement("div");
-    d.className = "entity " + e.type;
-    d.style.left = (e.x * TILE_PX) + "px";
-    d.style.top = (e.y * TILE_PX) + "px";
-    if (e.type === "gold")    d.innerHTML = "<span>$</span>";
-    if (e.type === "flower")  d.innerHTML = "<span>✿</span>";
-    if (e.type === "chest")   d.innerHTML = "<span>▣</span>";
-    if (e.type === "monster") d.innerHTML = `<span>${e.name[0]}</span><div class="hp-bar"><div style="width:${(e.hp/e.maxHp)*100}%"></div></div>`;
-    if (e.type === "boss")    { d.classList.add("big"); d.innerHTML = `<span>☠</span><div class="hp-bar boss"><div style="width:${(e.hp/e.maxHp)*100}%"></div></div>`; }
-    layer.appendChild(d);
-  }
-}
-
-function renderPlayers() {
-  const layer = $("#players-layer");
-  layer.innerHTML = "";
-  for (const [id, p] of Object.entries(state.players)) {
-    if (!p.role || p.x === undefined) continue;
-    const d = document.createElement("div");
-    d.className = "player " + p.role + (id === state.myId ? " me" : "") + (p.alive ? "" : " dead");
-    d.style.left = (p.x * TILE_PX) + "px";
-    d.style.top = (p.y * TILE_PX) + "px";
-    d.innerHTML = `<span>${ROLES[p.role].glyph}</span><div class="name">${escapeHTML(p.name)}</div>`;
-    layer.appendChild(d);
-  }
-  centerOnMe();
-}
-
-function centerOnMe() {
-  const me = state.players[state.myId];
-  if (!me || me.x === undefined) return;
-  const view = $("#view");
-  const targetX = me.x * TILE_PX - view.clientWidth / 2 + TILE_PX / 2;
-  const targetY = me.y * TILE_PX - view.clientHeight / 2 + TILE_PX / 2;
-  view.scrollTo({ left: targetX, top: targetY, behavior: "smooth" });
-}
-
-function renderHud() {
-  const hud = $("#hud");
-  if (!hud) return;
-  hud.innerHTML = "";
-  for (const role of ["scout", "brawler", "mystic"]) {
-    const p = Object.values(state.players).find(x => x.role === role);
-    if (!p) continue;
-    const pct = p.maxHp ? Math.max(0, (p.hp / p.maxHp) * 100) : 0;
-    const tile = document.createElement("div");
-    tile.className = `hud-tile ${role}` + (p.alive ? "" : " dead");
-    tile.innerHTML = `
-      <div class="role-row">${ROLES[role].glyph} <strong>${escapeHTML(p.name)}</strong> <span class="role-tag">${ROLES[role].name}</span></div>
-      <div class="hp-row"><div class="hp-bar"><div style="width:${pct}%"></div></div><span class="hp-num">${p.hp}/${p.maxHp}</span></div>
-      <div class="gold-row">★ ${p.gold} gold</div>
-    `;
-    hud.appendChild(tile);
-  }
+function restart() {
+  location.reload();
 }
 
 // --- Input ---
-function tryMove(dx, dy) {
-  const me = state.players[state.myId];
-  if (!me || !me.alive) return;
-  const now = performance.now();
-  const cd = ROLES[state.myRole].moveMs;
-  if (now - state.lastMoveAt < cd) return;
-  const nx = me.x + dx, ny = me.y + dy;
-  if (!isWalkable(state.world, nx, ny)) return;
-  // Blocked by monster or boss tile
-  const blocker = Object.values(state.entities).find(e =>
-    (e.type === "monster" || e.type === "boss") && e.x === nx && e.y === ny);
-  if (blocker) return;
-  me.x = nx; me.y = ny;
-  state.lastMoveAt = now;
-  send({ type: "move", id: state.myId, x: nx, y: ny });
-  renderPlayers();
-}
-
-function tryAttack() {
-  const me = state.players[state.myId];
-  if (!me || !me.alive) return;
-  send({ type: "attack", id: state.myId });
-}
-
-function tryAbility() {
-  const me = state.players[state.myId];
-  if (!me || !me.alive) return;
-  if (state.myRole !== "mystic") return;
-  const now = performance.now();
-  if (now - state.lastAbilityAt < 8000) {
-    banner("Ability cooling down…", "info");
-    return;
-  }
-  state.lastAbilityAt = now;
-  send({ type: "ability", id: state.myId });
-}
-
-// --- Host logic (authoritative) ---
-function hostCheckPickup(playerId) {
-  const p = state.players[playerId];
-  if (!p) return;
-  for (const [id, e] of Object.entries(state.entities)) {
-    if (e.x !== p.x || e.y !== p.y) continue;
-    if (e.type === "gold" || e.type === "chest") {
-      const delta = e.value ?? e.gold ?? 0;
-      p.gold = (p.gold || 0) + delta;
-      send({ type: "player-gold", id: playerId, gold: p.gold, delta });
-      delete state.entities[id];
-      send({ type: "entity-remove", id });
-    } else if (e.type === "flower") {
-      const newHp = Math.min(p.maxHp, p.hp + e.heal);
-      const delta = newHp - p.hp;
-      p.hp = newHp;
-      send({ type: "player-hp", id: playerId, hp: newHp, delta });
-      delete state.entities[id];
-      send({ type: "entity-remove", id });
-    }
-  }
-}
-
-function hostResolveAttack(playerId) {
-  const p = state.players[playerId];
-  if (!p || !p.alive) return;
-  // Find adjacent monster/boss
-  let target = null, targetId = null;
-  for (const [id, e] of Object.entries(state.entities)) {
-    if (e.type !== "monster" && e.type !== "boss") continue;
-    if (manhattan(p, e) === 1) { target = e; targetId = id; break; }
-  }
-  if (!target) return;
-  const role = ROLES[p.role];
-  target.hp -= role.dmg;
-  if (target.hp <= 0) {
-    p.gold = (p.gold || 0) + (target.gold || 0);
-    send({ type: "player-gold", id: playerId, gold: p.gold, delta: target.gold || 0 });
-    delete state.entities[targetId];
-    send({ type: "entity-remove", id: targetId });
-    if (target.type === "boss") {
-      send({ type: "win" });
-      state.phase = "won";
-    }
-  } else {
-    state.entities[targetId] = target;
-    send({ type: "entity-update", id: targetId, entity: target });
-  }
-}
-
-function hostResolveAbility(playerId) {
-  // Mystic heal pulse: heal all allies within 3 tiles for 12 HP
-  const p = state.players[playerId];
-  if (!p) return;
-  for (const [id, ally] of Object.entries(state.players)) {
-    if (!ally.role || !ally.alive) continue;
-    if (manhattan(ally, p) <= 3) {
-      const newHp = Math.min(ally.maxHp, ally.hp + 12);
-      const delta = newHp - ally.hp;
-      if (delta > 0) {
-        ally.hp = newHp;
-        send({ type: "player-hp", id, hp: newHp, delta });
-      }
-    }
-  }
-}
-
-function startHostLoop() {
-  if (state._loop) return;
-  state._loop = setInterval(() => hostTick(), 700);
-}
-
-function hostTick() {
-  if (state.phase !== "playing") return;
-  // Monsters: if a player is adjacent, attack them
-  for (const [eid, e] of Object.entries(state.entities)) {
-    if (e.type !== "monster" && e.type !== "boss") continue;
-    let victim = null, victimId = null;
-    for (const [pid, p] of Object.entries(state.players)) {
-      if (!p.alive || !p.role) continue;
-      if (manhattan(p, e) === 1) { victim = p; victimId = pid; break; }
-    }
-    if (victim) {
-      victim.hp -= e.dmg;
-      if (victim.hp <= 0) {
-        victim.hp = 0;
-        victim.alive = false;
-        setTimeout(() => respawn(victimId), 4000);
-      }
-      send({ type: "player-hp", id: victimId, hp: victim.hp, delta: -e.dmg });
-    }
-  }
-  if (state.solo) aiTick();
-}
-
-function aiTick() {
-  const leader = state.players[state.myId];
-  if (!leader || leader.x === undefined) return;
-
-  for (const [aid, ai] of Object.entries(state.players)) {
-    if (!ai.isAI || !ai.alive) continue;
-
-    // 1) If adjacent to a monster/boss, attack it
-    let target = null, targetId = null;
-    for (const [eid, e] of Object.entries(state.entities)) {
-      if (e.type !== "monster" && e.type !== "boss") continue;
-      if (manhattan(ai, e) === 1) { target = e; targetId = eid; break; }
-    }
-    if (target) {
-      const role = ROLES[ai.role];
-      target.hp -= role.dmg;
-      if (target.hp <= 0) {
-        ai.gold = (ai.gold || 0) + (target.gold || 0);
-        send({ type: "player-gold", id: aid, gold: ai.gold, delta: target.gold || 0 });
-        delete state.entities[targetId];
-        send({ type: "entity-remove", id: targetId });
-        if (target.type === "boss") {
-          send({ type: "win" });
-          state.phase = "won";
-        }
-      } else {
-        send({ type: "entity-update", id: targetId, entity: target });
-      }
-      continue;
-    }
-
-    // 2) Mystic AI: heal pulse if anyone nearby is below 50% HP
-    if (ai.role === "mystic") {
-      const cd = state.aiHealCooldowns[aid] || 0;
-      if (Date.now() >= cd) {
-        const needsHeal = Object.values(state.players).some(p =>
-          p.role && p.alive && (p.hp / p.maxHp) < 0.5 && manhattan(p, ai) <= 3
-        );
-        if (needsHeal) {
-          state.aiHealCooldowns[aid] = Date.now() + 8000;
-          hostResolveAbility(aid);
-          continue;
-        }
-      }
-    }
-
-    // 3) Move toward the leader, or toward a nearby enemy if leader is fighting
-    let goalX = leader.x, goalY = leader.y;
-    const nearbyEnemy = Object.values(state.entities).find(e =>
-      (e.type === "monster" || e.type === "boss") && manhattan(ai, e) <= 5);
-    if (nearbyEnemy && manhattan(leader, nearbyEnemy) <= 4) {
-      goalX = nearbyEnemy.x; goalY = nearbyEnemy.y;
-    }
-    const dist = Math.abs(goalX - ai.x) + Math.abs(goalY - ai.y);
-    if (dist <= 1) continue; // already in range
-
-    const dx = Math.sign(goalX - ai.x);
-    const dy = Math.sign(goalY - ai.y);
-    const tries = Math.abs(goalX - ai.x) >= Math.abs(goalY - ai.y)
-      ? [[dx, 0], [0, dy], [0, -dy || 1], [-dx || 1, 0]]
-      : [[0, dy], [dx, 0], [-dx || 1, 0], [0, -dy || 1]];
-
-    for (const [tdx, tdy] of tries) {
-      if (tdx === 0 && tdy === 0) continue;
-      const nx = ai.x + tdx, ny = ai.y + tdy;
-      if (!isWalkable(state.world, nx, ny)) continue;
-      const monsterThere = Object.values(state.entities).find(e =>
-        (e.type === "monster" || e.type === "boss") && e.x === nx && e.y === ny);
-      if (monsterThere) continue;
-      const playerThere = Object.values(state.players).find(p =>
-        p.role && p !== ai && p.x === nx && p.y === ny);
-      if (playerThere) continue;
-      ai.x = nx; ai.y = ny;
-      send({ type: "move", id: aid, x: nx, y: ny });
-      hostCheckPickup(aid);
-      break;
-    }
-  }
-}
-
-function respawn(playerId) {
-  const p = state.players[playerId];
-  if (!p) return;
-  const order = ["scout", "brawler", "mystic"];
-  const sp = state.world.spawns[order.indexOf(p.role)] || state.world.spawns[0];
-  p.x = sp.x; p.y = sp.y;
-  p.hp = Math.floor(p.maxHp * 0.7);
-  p.alive = true;
-  send({ type: "player-hp", id: playerId, hp: p.hp, delta: p.hp, x: sp.x, y: sp.y });
-}
-
-// --- FX helpers ---
-function flashScreen(kind) {
-  const f = $("#flash");
-  f.className = "flash " + kind;
-  setTimeout(() => { f.className = "flash"; }, 250);
-}
-
-function toast(text, kind = "info") {
-  const t = document.createElement("div");
-  t.className = "toast " + kind;
-  t.textContent = text;
-  $("#toasts").appendChild(t);
-  setTimeout(() => t.classList.add("fade"), 1100);
-  setTimeout(() => t.remove(), 1700);
-}
-
-function endStatsHTML() {
-  return Object.values(state.players)
-    .filter(p => p.role)
-    .sort((a, b) => (b.gold || 0) - (a.gold || 0))
-    .map((p, i) => `
-      <div class="hud-tile ${p.role}">
-        <div class="role-row">${i === 0 ? "★ " : ""}${ROLES[p.role].glyph} <strong>${escapeHTML(p.name)}</strong></div>
-        <div class="gold-row">${p.gold || 0} gold</div>
-      </div>
-    `).join("");
-}
-
-// --- Keyboard ---
 function setupInput() {
   document.addEventListener("keydown", (e) => {
-    if (state.phase !== "playing") return;
-    if (state.pressed[e.key]) return;
-    state.pressed[e.key] = true;
-    const k = e.key.toLowerCase();
-    if (k === "w" || k === "arrowup")    tryMove(0, -1);
-    else if (k === "s" || k === "arrowdown")  tryMove(0, 1);
-    else if (k === "a" || k === "arrowleft")  tryMove(-1, 0);
-    else if (k === "d" || k === "arrowright") tryMove(1, 0);
-    else if (k === " ") { e.preventDefault(); tryAttack(); }
-    else if (k === "e") tryAbility();
+    state.keys[e.key] = true;
+    if (e.key.toLowerCase() === "e" && state.nearbyBeat && !state.dialogueOpen) {
+      openBeat(state.nearbyBeat);
+    }
   });
-  document.addEventListener("keyup", (e) => { state.pressed[e.key] = false; });
-
-  // Hold-to-move
-  setInterval(() => {
-    if (state.phase !== "playing") return;
-    if (state.pressed["w"] || state.pressed["ArrowUp"])    tryMove(0, -1);
-    else if (state.pressed["s"] || state.pressed["ArrowDown"])  tryMove(0, 1);
-    else if (state.pressed["a"] || state.pressed["ArrowLeft"])  tryMove(-1, 0);
-    else if (state.pressed["d"] || state.pressed["ArrowRight"]) tryMove(1, 0);
-  }, 60);
+  document.addEventListener("keyup", (e) => {
+    state.keys[e.key] = false;
+  });
+  // Re-lock pointer on canvas click after pause
+  state.renderer.domElement.addEventListener("click", () => {
+    if (state.started && !state.dialogueOpen && !state.finished) {
+      state.controls.lock();
+    }
+  });
 }
 
-// --- Wire-up ---
+// --- Seeded RNG ---
+function mulberry32(seed) {
+  let s = seed >>> 0;
+  return () => {
+    s = (s + 0x6D2B79F5) >>> 0;
+    let t = Math.imul(s ^ (s >>> 15), 1 | s);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+// --- Boot ---
 document.addEventListener("DOMContentLoaded", () => {
-  $("#host-btn").addEventListener("click", hostRoom);
-  $("#join-btn").addEventListener("click", joinRoom);
-  $("#solo-btn").addEventListener("click", startSolo);
-  $("#start-btn").addEventListener("click", startGame);
-  $("#play-again").addEventListener("click", () => location.reload());
-  $("#btn-attack").addEventListener("click", tryAttack);
-  $("#btn-ability").addEventListener("click", tryAbility);
+  initScene();
   setupInput();
+  $("#begin-btn").addEventListener("click", begin);
+  $("#restart-btn").addEventListener("click", restart);
+  loop();
 });
